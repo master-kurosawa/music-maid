@@ -1,3 +1,4 @@
+use anyhow::anyhow;
 use ignore::{WalkBuilder, WalkState};
 use nom::{bits, bytes};
 use nom::{
@@ -25,6 +26,18 @@ struct PICTURE_MARKER;
 impl PICTURE_MARKER {
     const END_OF_BLOCK: u8 = 0b10000110;
     const MARKER: u8 = 0b00000110;
+}
+
+#[derive(Debug)]
+struct Picture {
+    picture_type: u32,
+    mime: String,
+    description: String,
+    width: u32,
+    height: u32,
+    color_depth: u32,
+    indexed_color_number: u32,
+    picture_data: Vec<u8>,
 }
 
 fn parse_vorbis(main_cursor: &mut usize, buf: &[u8], header: &[u8]) {
@@ -59,35 +72,114 @@ fn parse_vorbis(main_cursor: &mut usize, buf: &[u8], header: &[u8]) {
     println!("{vendor_string}");
 }
 
-async fn read_with_uring(path: &Path) -> Result<(), Box<dyn Error + Send + Sync>> {
+fn read_u32(cursor: &mut usize, buf: &[u8]) -> anyhow::Result<u32> {
+    let bytes = buf
+        .get(*cursor..*cursor + 4)
+        .ok_or(anyhow!("Buffer too small"))?;
+    *cursor += 4;
+    Ok(u32::from_be_bytes(
+        bytes.try_into().map_err(|_| anyhow!("Invalid slice"))?,
+    ))
+}
+
+fn parse_picture(cursor: &mut usize, buf: &[u8]) -> anyhow::Result<Picture> {
+    let picture_type = read_u32(cursor, buf)?;
+    let mime_len = read_u32(cursor, buf)? as usize;
+    let mime = String::from_utf8_lossy(
+        buf.get(*cursor..*cursor + mime_len)
+            .ok_or(anyhow!("Buffer too small"))?,
+    );
+    *cursor += mime_len;
+    let description_len = read_u32(cursor, buf)? as usize;
+    let description = String::from_utf8_lossy(
+        buf.get(*cursor..*cursor + description_len)
+            .ok_or(anyhow!("Buffer too small"))?,
+    );
+    *cursor += description_len;
+    let width = read_u32(cursor, buf)?;
+    let height = read_u32(cursor, buf)?;
+    let color_depth = read_u32(cursor, buf)?;
+    let indexed_color_number = read_u32(cursor, buf)?;
+    let picture_len = read_u32(cursor, buf)? as usize;
+    let picture_data = buf
+        .get(*cursor..*cursor + picture_len)
+        .ok_or(anyhow!("Buffer too small"))?
+        .to_vec();
+
+    *cursor += picture_len;
+    Ok(Picture {
+        picture_type,
+        mime: mime.to_string(),
+        description: description.to_string(),
+        width,
+        height,
+        color_depth,
+        indexed_color_number,
+        picture_data,
+    })
+}
+
+pub enum ParseError {
+    EndOfBufer,
+}
+
+async fn read_ahead_next_header(file: &File, size: usize, offset: u64) -> anyhow::Result<Vec<u8>> {
+    let buf = vec![0; size + 8196];
+    let (_res, prefix_buf) = file.read_at(buf, offset).await;
+    let bytes_read = _res?;
+    if bytes_read < size + 4 {
+        return Err(anyhow!("Not enough bytes for next header"));
+    }
+    Ok(prefix_buf)
+}
+
+async fn read_with_uring(path: &Path) -> anyhow::Result<()> {
     let file = File::open(path).await?;
-    let buf = vec![0; 1_000_000];
-    let (_res, prefix_buf) = file.read_at(buf, 0).await;
+    let buf = vec![0; 8196];
+    let (_res, mut prefix_buf) = file.read_at(buf, 0).await;
+    let bytes_read = _res?;
+
     if prefix_buf[0..4] == FLAC_MARKER {
+        if bytes_read < 42 {
+            return Err(anyhow!(
+                "Not enough bytes for proper flac STREAMINFO, got {}",
+                bytes_read
+            ));
+        }
+
         println!("\n");
         let mut cursor = 4;
         loop {
-            let header = &prefix_buf[cursor..cursor + 4];
-            println!("{header:?}");
+            let header: Box<[u8]> = prefix_buf[cursor..cursor + 4].to_vec().into_boxed_slice();
+            let block_length = u32::from_be_bytes([0, header[1], header[2], header[3]]) as usize;
+            if prefix_buf.len() < cursor + block_length + 4 {
+                prefix_buf = read_ahead_next_header(&file, block_length, cursor as u64).await?;
+                cursor = 0;
+            };
+
             match header[0] {
                 VORBIS_COMMENT_MARKER::MARKER => {
-                    parse_vorbis(&mut cursor, &prefix_buf, header);
+                    parse_vorbis(&mut cursor, &prefix_buf, &header);
                 }
                 VORBIS_COMMENT_MARKER::END_OF_BLOCK => {
-                    parse_vorbis(&mut cursor, &prefix_buf, header);
+                    parse_vorbis(&mut cursor, &prefix_buf, &header);
                     break;
                 }
                 PICTURE_MARKER::MARKER => {
-                    break;
+                    cursor += 4;
+                    let picture = parse_picture(&mut cursor, &prefix_buf)?;
                 }
                 PICTURE_MARKER::END_OF_BLOCK => {
+                    cursor += 4;
+                    let picture = parse_picture(&mut cursor, &prefix_buf)?;
                     break;
                 }
+                // end marker
                 n if n >= 128 => {
                     break;
                 }
                 _ => {
-                    cursor += u32::from_be_bytes([0, header[1], header[2], header[3]]) as usize;
+                    cursor += block_length;
                     cursor += 4;
                 }
             }
