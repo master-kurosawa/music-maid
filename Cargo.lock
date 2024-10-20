@@ -735,11 +735,9 @@ dependencies = [
  "anyhow",
  "futures",
  "ignore",
- "nom",
  "sqlx",
  "sysinfo",
  "tokio",
- "tokio-stream",
  "tokio-uring",
 ]
 
