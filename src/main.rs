@@ -52,6 +52,7 @@ impl PICTURE_MARKER {
 struct MusicFile {
     path: String,
     comments: Vec<VorbisComment>,
+    pictures: Vec<Picture>,
 }
 
 #[derive(Debug, Clone)]
@@ -123,7 +124,7 @@ impl VorbisComment {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Picture {
     picture_type: u32,
     mime: String,
@@ -132,6 +133,7 @@ struct Picture {
     height: u32,
     color_depth: u32,
     indexed_color_number: u32,
+    size: u32,
     // picture_data: Vec<u8>,
 }
 
@@ -144,20 +146,17 @@ fn parse_vorbis(
     let mut comments = HashMap::new();
     let vorbis_end = cursor + block_length;
     let vorbis_block = &buf[cursor..vorbis_end];
-    let vendor_end = 4 + u32::from_le_bytes(vorbis_block[0..4].try_into().unwrap()) as usize;
+    let vendor_end = 4 + u32::from_le_bytes(vorbis_block[0..4].try_into()?) as usize;
     comments.insert(
         "vendor".to_string(),
         String::from_utf8_lossy(&vorbis_block[4..vendor_end]).to_string(),
     );
-    let comment_list_len =
-        u32::from_le_bytes(vorbis_block[vendor_end..vendor_end + 4].try_into().unwrap());
+    let comment_list_len = u32::from_le_bytes(vorbis_block[vendor_end..vendor_end + 4].try_into()?);
     let mut comment_cursor = vendor_end + 4;
     for _ in 1..=comment_list_len {
-        let comment_len = u32::from_le_bytes(
-            vorbis_block[comment_cursor..4 + comment_cursor]
-                .try_into()
-                .unwrap(),
-        ) as usize;
+        let comment_len =
+            u32::from_le_bytes(vorbis_block[comment_cursor..4 + comment_cursor].try_into()?)
+                as usize;
         comment_cursor += 4;
         let comment =
             String::from_utf8_lossy(&vorbis_block[comment_cursor..comment_cursor + comment_len])
@@ -171,7 +170,7 @@ fn parse_vorbis(
                     continue;
                 }
             }
-            None => return Err(anyhow!("Corrupted comment")),
+            None => return Err(anyhow!("Corrupted comment: {comment}")),
         };
 
         comment_cursor += comment_len;
@@ -219,7 +218,7 @@ fn parse_picture(cursor: &mut usize, buf: &[u8]) -> anyhow::Result<Picture> {
     let height = read_u32(cursor, buf)?;
     let color_depth = read_u32(cursor, buf)?;
     let indexed_color_number = read_u32(cursor, buf)?;
-    //let picture_len = read_u32(&mut cursor, buf)? as usize;
+    let picture_len = read_u32(cursor, buf)?;
     //let picture_data = buf
     //    .get(*cursor..*cursor + picture_len)
     //    .ok_or(anyhow!("Buffer too small"))?
@@ -227,6 +226,7 @@ fn parse_picture(cursor: &mut usize, buf: &[u8]) -> anyhow::Result<Picture> {
 
     Ok(Picture {
         picture_type,
+        size: picture_len,
         mime: mime.to_string(),
         description: description.to_string(),
         width,
@@ -234,10 +234,6 @@ fn parse_picture(cursor: &mut usize, buf: &[u8]) -> anyhow::Result<Picture> {
         color_depth,
         indexed_color_number,
     })
-}
-
-pub enum ParseError {
-    EndOfBufer,
 }
 
 async fn read_ahead_offset(file: &File, size: usize, offset: u64) -> anyhow::Result<Vec<u8>> {
@@ -250,15 +246,90 @@ async fn read_ahead_offset(file: &File, size: usize, offset: u64) -> anyhow::Res
     Ok(prefix_buf)
 }
 
+async fn parse_flac(
+    buf: Vec<u8>,
+    file: File,
+    vorbis_comments: &mut Vec<VorbisComment>,
+    pictures_metadata: &mut Vec<Picture>,
+) -> anyhow::Result<()> {
+    let mut cursor = 4;
+    let mut buf = buf;
+
+    loop {
+        let header: Box<[u8]> = buf[cursor..cursor + 4].to_vec().into_boxed_slice();
+        let block_length = u32::from_be_bytes([0, header[1], header[2], header[3]]) as usize;
+        let buf_len = buf.len();
+        cursor += 4;
+
+        match header[0] {
+            VORBIS_COMMENT_MARKER::MARKER => {
+                if buf_len <= cursor + block_length {
+                    mem::drop(buf);
+                    buf = read_ahead_offset(&file, block_length, cursor as u64).await?;
+                    cursor = 0;
+                }
+                vorbis_comments.push(parse_vorbis(&cursor, &buf, block_length)?);
+                cursor += block_length;
+            }
+            VORBIS_COMMENT_MARKER::END_OF_BLOCK => {
+                if buf_len <= cursor + block_length {
+                    mem::drop(buf);
+                    buf = read_ahead_offset(&file, block_length - 8196, cursor as u64).await?;
+                    cursor = 0;
+                }
+
+                vorbis_comments.push(parse_vorbis(&cursor, &buf, block_length)?);
+                break;
+            }
+            PICTURE_MARKER::MARKER => {
+                // mime and description can be up to 2^32 bytes each for some reason
+                // Im assigning max 8196 bytes for the whole meta and i dont care
+                if buf_len <= cursor + 8196 {
+                    mem::drop(buf);
+                    buf = read_ahead_offset(&file, 4, cursor as u64).await?;
+                    cursor = 0;
+                }
+                pictures_metadata.push(parse_picture(&mut cursor, &buf)?);
+            }
+            PICTURE_MARKER::END_OF_BLOCK => {
+                // mime and description can be up to 2^32 bytes each for some reason
+                // Im assigning max 8196 bytes for the whole meta and i dont care
+                if buf_len <= cursor + 8196 {
+                    mem::drop(buf);
+                    buf = read_ahead_offset(&file, 0, cursor as u64).await?;
+                    cursor = 0;
+                }
+                pictures_metadata.push(parse_picture(&mut cursor, &buf)?);
+                break;
+            }
+            n if n >= 128 => {
+                // reached end marker
+                break;
+            }
+            _ => {
+                // ignored block
+                cursor += block_length;
+                if buf_len <= cursor + 4 {
+                    mem::drop(buf);
+                    buf = read_ahead_offset(&file, 0, cursor as u64).await?;
+                    cursor = 0;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn read_with_uring(
     path: &Path,
     queue: Arc<tokio::sync::Mutex<TaskQueue>>,
 ) -> anyhow::Result<()> {
     let file = File::open(path).await?;
     let mut vorbis_comments: Vec<VorbisComment> = Vec::new();
+    let mut pictures_metadata: Vec<Picture> = Vec::new();
 
     let buf = vec![0; 8196];
-    let (_res, mut prefix_buf) = file.read_at(buf, 0).await;
+    let (_res, prefix_buf) = file.read_at(buf, 0).await;
     let bytes_read = _res?;
 
     if prefix_buf[0..4] == FLAC_MARKER {
@@ -268,74 +339,14 @@ async fn read_with_uring(
                 bytes_read
             ));
         }
-
-        let mut cursor = 4;
-
-        loop {
-            let header: Box<[u8]> = prefix_buf[cursor..cursor + 4].to_vec().into_boxed_slice();
-            let block_length = u32::from_be_bytes([0, header[1], header[2], header[3]]) as usize;
-            let buf_len = prefix_buf.len();
-            cursor += 4;
-
-            match header[0] {
-                VORBIS_COMMENT_MARKER::MARKER => {
-                    if buf_len <= cursor + block_length {
-                        mem::drop(prefix_buf);
-                        prefix_buf = read_ahead_offset(&file, block_length, cursor as u64).await?;
-                        cursor = 0;
-                    }
-                    vorbis_comments.push(parse_vorbis(&cursor, &prefix_buf, block_length)?);
-                    cursor += block_length;
-                }
-                VORBIS_COMMENT_MARKER::END_OF_BLOCK => {
-                    if buf_len <= cursor + block_length {
-                        mem::drop(prefix_buf);
-                        prefix_buf =
-                            read_ahead_offset(&file, block_length - 8196, cursor as u64).await?;
-                        cursor = 0;
-                    }
-
-                    vorbis_comments.push(parse_vorbis(&cursor, &prefix_buf, block_length)?);
-                    break;
-                }
-                PICTURE_MARKER::MARKER => {
-                    // mime and description can be up to 2^32 bytes each for some reason
-                    // Im assigning max 8196 bytes for the whole meta and i dont care
-                    if buf_len <= cursor + 8196 {
-                        mem::drop(prefix_buf);
-                        prefix_buf = read_ahead_offset(&file, 4, cursor as u64).await?;
-                        cursor = 0;
-                    }
-                    let picture = parse_picture(&mut cursor, &prefix_buf)?;
-                }
-                PICTURE_MARKER::END_OF_BLOCK => {
-                    // mime and description can be up to 2^32 bytes each for some reason
-                    // Im assigning max 8196 bytes for the whole meta and i dont care
-                    if buf_len <= cursor + 8196 {
-                        mem::drop(prefix_buf);
-                        prefix_buf = read_ahead_offset(&file, 0, cursor as u64).await?;
-                        cursor = 0;
-                    }
-                    let picture = parse_picture(&mut cursor, &prefix_buf)?;
-                    break;
-                }
-                n if n >= 128 => {
-                    // reached end marker
-                    break;
-                }
-                _ => {
-                    // ignored block
-                    cursor += block_length;
-                    if buf_len <= cursor + 4 {
-                        mem::drop(prefix_buf);
-                        prefix_buf = read_ahead_offset(&file, 0, cursor as u64).await?;
-                        cursor = 0;
-                    }
-                }
-            }
-        }
+        parse_flac(
+            prefix_buf,
+            file,
+            &mut vorbis_comments,
+            &mut pictures_metadata,
+        )
+        .await?;
     }
-    mem::drop(prefix_buf);
 
     let path = path.to_string_lossy().to_string();
     queue
@@ -344,6 +355,7 @@ async fn read_with_uring(
         .push(MusicFile {
             path,
             comments: vorbis_comments,
+            pictures: pictures_metadata,
         })
         .await;
     Ok(())
@@ -351,13 +363,12 @@ async fn read_with_uring(
 
 #[derive(Debug)]
 struct TaskQueue {
-    pool: Pool<Sqlite>,
     queue: Vec<MusicFile>,
     executor: JoinHandle<()>,
     sender: Sender<Option<Vec<MusicFile>>>,
 }
 impl TaskQueue {
-    pub fn new(pool: Pool<Sqlite>) -> Self {
+    pub fn new() -> Self {
         let (sender, mut receiver) = mpsc::channel::<Option<Vec<MusicFile>>>(100);
         let executor = tokio::spawn(async move {
             let pool = SqlitePool::connect("sqlite://music.db").await.unwrap();
@@ -372,7 +383,6 @@ impl TaskQueue {
             queue: Vec::new(),
             executor,
             sender,
-            pool,
         }
     }
     pub async fn finish(self) {
@@ -432,6 +442,36 @@ impl TaskQueue {
                 .bind(&comment.location)
                 .bind(&comment.contact)
                 .bind(&comment.isrc)
+                .execute(&mut *transaction)
+                .await
+                .unwrap();
+            }
+            for picture in &item.pictures {
+                sqlx::query(
+                    "
+                    INSERT INTO 
+                    picture_metadata(
+                        file_id,
+                        picture_type,
+                        mime,
+                        description,
+                        width,
+                        height,
+                        color_depth,
+                        indexed_color_number,
+                        size
+                        )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?);",
+                )
+                .bind(file_id)
+                .bind(picture.picture_type)
+                .bind(&picture.mime)
+                .bind(&picture.description)
+                .bind(picture.width)
+                .bind(picture.height)
+                .bind(picture.color_depth)
+                .bind(picture.indexed_color_number)
+                .bind(picture.size)
                 .execute(&mut *transaction)
                 .await
                 .unwrap();
@@ -510,12 +550,24 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     path TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS picture_metadata(
+        file_id INTEGER NOT NULL,
+        picture_type INTEGER NOT NULL,
+        mime TEXT NOT NULL,
+        description TEXT NOT NULL,
+        width INTEGER NOT NULL,
+        height INTEGER NOT NULL,
+        color_depth INTEGER NOT NULL,
+        indexed_color_number INTEGER NOT NULL,
+        size INTEGER NOT NULL,
+        FOREIGN KEY (file_id) REFERENCES files(id)
+);
 ",
         )
         .execute(&pool)
         .await
         .unwrap();
-        let queue = Arc::new(tokio::sync::Mutex::new(TaskQueue::new(pool)));
+        let queue = Arc::new(tokio::sync::Mutex::new(TaskQueue::new()));
         for entry in paths.lock().into_iter() {
             entry.clone().into_iter().for_each(|path| {
                 let queue = Arc::clone(&queue);
@@ -525,7 +577,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                 tasks.push(spawn);
             });
         }
-        for task in tasks.into_iter().rev() {
+        for task in tasks {
             task.await.unwrap();
         }
         let q = Arc::try_unwrap(queue).unwrap().into_inner();
