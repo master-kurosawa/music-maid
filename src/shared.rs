@@ -21,6 +21,8 @@ pub const VORBIS_FIELDS_LOWER: [&str; 15] = [
 ];
 
 pub const FLAC_MARKER: [u8; 4] = [0x66, 0x4C, 0x61, 0x43];
+pub const OGG_MARKER: [u8; 4] = [0x4F, 0x67, 0x67, 0x53];
+
 #[derive(Debug, Clone)]
 pub struct MusicFile {
     pub path: String,

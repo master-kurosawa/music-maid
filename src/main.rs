@@ -4,8 +4,9 @@ pub mod utils;
 
 use anyhow::anyhow;
 use formats::flac::parse_flac;
+use formats::opus_ogg::parse_ogg_page;
 use ignore::{WalkBuilder, WalkState};
-use shared::{MusicFile, Picture, VorbisComment, FLAC_MARKER};
+use shared::{MusicFile, Picture, VorbisComment, FLAC_MARKER, OGG_MARKER};
 use sqlx::migrate::MigrateDatabase;
 use sqlx::{Sqlite, SqlitePool};
 use std::{
@@ -28,20 +29,39 @@ async fn read_with_uring(
     let (_res, prefix_buf) = file.read_at(buf, 0).await;
     let bytes_read = _res?;
 
-    if prefix_buf[0..4] == FLAC_MARKER {
-        if bytes_read < 42 {
-            return Err(anyhow!(
-                "Not enough bytes for proper flac STREAMINFO, got {}",
-                bytes_read
-            ));
+    let marker: [u8; 4] = prefix_buf[0..4].try_into().unwrap();
+    match marker {
+        FLAC_MARKER => {
+            if bytes_read < 42 {
+                return Err(anyhow!(
+                    "Not enough bytes for proper flac STREAMINFO, got {}",
+                    bytes_read
+                ));
+            }
+            parse_flac(
+                prefix_buf,
+                file,
+                &mut vorbis_comments,
+                &mut pictures_metadata,
+            )
+            .await?;
         }
-        parse_flac(
-            prefix_buf,
-            file,
-            &mut vorbis_comments,
-            &mut pictures_metadata,
-        )
-        .await?;
+        OGG_MARKER => {
+            if bytes_read < 42 {
+                return Err(anyhow!(
+                    "Not enough bytes for proper flac STREAMINFO, got {}",
+                    bytes_read
+                ));
+            }
+            parse_ogg_page(
+                prefix_buf,
+                file,
+                &mut vorbis_comments,
+                &mut pictures_metadata,
+            )
+            .await?;
+        }
+        _ => {}
     }
 
     let path = path.to_string_lossy().to_string();
