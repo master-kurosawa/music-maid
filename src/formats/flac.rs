@@ -43,7 +43,8 @@ pub async fn parse_flac(
                     buf = read_ahead_offset(&file, block_length, cursor as u64).await?;
                     cursor = 0;
                 }
-                vorbis_comments.push(parse_vorbis(&cursor, &buf, block_length)?);
+                let comment = parse_vorbis(&cursor, &buf, block_length)?;
+                vorbis_comments.push(comment);
                 cursor += block_length;
             }
             VORBIS_COMMENT_MARKER::END_OF_BLOCK => {
@@ -52,8 +53,8 @@ pub async fn parse_flac(
                     buf = read_ahead_offset(&file, block_length - 8196, cursor as u64).await?;
                     cursor = 0;
                 }
-
-                vorbis_comments.push(parse_vorbis(&cursor, &buf, block_length)?);
+                let comment = parse_vorbis(&cursor, &buf, block_length)?;
+                vorbis_comments.push(comment);
                 break;
             }
             PICTURE_MARKER::MARKER => {

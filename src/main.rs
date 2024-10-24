@@ -4,7 +4,7 @@ pub mod utils;
 
 use anyhow::anyhow;
 use formats::flac::parse_flac;
-use formats::opus_ogg::parse_ogg_page;
+use formats::opus_ogg::parse_ogg_pages;
 use ignore::{WalkBuilder, WalkState};
 use shared::{MusicFile, Picture, VorbisComment, FLAC_MARKER, OGG_MARKER};
 use sqlx::migrate::MigrateDatabase;
@@ -53,7 +53,7 @@ async fn read_with_uring(
                     bytes_read
                 ));
             }
-            parse_ogg_page(
+            parse_ogg_pages(
                 prefix_buf,
                 file,
                 &mut vorbis_comments,
@@ -126,6 +126,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         location TEXT NOT NULL,
         contact TEXT NOT NULL,
         isrc TEXT NOT NULL,
+        outcast TEXT NOT NULL,
         FOREIGN KEY (file_id) REFERENCES files(id)
     );
 ",

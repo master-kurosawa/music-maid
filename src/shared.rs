@@ -1,6 +1,5 @@
 use std::collections::HashMap;
-
-use anyhow::anyhow;
+//use anyhow::anyhow;
 
 pub const VORBIS_FIELDS_LOWER: [&str; 15] = [
     "title",
@@ -48,9 +47,11 @@ pub struct VorbisComment {
     pub location: String,
     pub contact: String,
     pub isrc: String,
+    pub outcast: String,
 }
 impl VorbisComment {
-    fn init(map: HashMap<String, String>) -> Self {
+    fn init(map: HashMap<String, String>, outcasts: Vec<String>) -> Self {
+        let outcast = outcasts.join("|||");
         let vendor = map.get("vendor").map_or(String::new(), |v| v.to_string());
         let contact = map.get("contact").map_or(String::new(), |v| v.to_string());
         let location = map.get("location").map_or(String::new(), |v| v.to_string());
@@ -95,6 +96,7 @@ impl VorbisComment {
             copyright,
             tracknumber,
             organization,
+            outcast,
         }
     }
 }
@@ -119,6 +121,7 @@ pub fn parse_vorbis(
 ) -> anyhow::Result<VorbisComment> {
     let cursor = *main_cursor;
     let mut comments = HashMap::new();
+    let mut outcasts = Vec::new();
     let vorbis_end = cursor + block_length;
     let vorbis_block = &buf[cursor..vorbis_end];
     let vendor_end = 4 + u32::from_le_bytes(vorbis_block[0..4].try_into()?) as usize;
@@ -132,6 +135,14 @@ pub fn parse_vorbis(
         let comment_len =
             u32::from_le_bytes(vorbis_block[comment_cursor..4 + comment_cursor].try_into()?)
                 as usize;
+
+        if comment_len + comment_cursor >= block_length {
+            continue;
+            // skip any corrupted comment lengths
+            //return Err(anyhow!(
+            //    "Corrupted comment length: {comment_len} > {block_length}"
+            //));
+        }
         comment_cursor += 4;
         let comment =
             String::from_utf8_lossy(&vorbis_block[comment_cursor..comment_cursor + comment_len])
@@ -141,26 +152,20 @@ pub fn parse_vorbis(
                 if VORBIS_FIELDS_LOWER.contains(key) {
                     comments.insert(key.to_lowercase(), val.to_string());
                 } else {
+                    outcasts.push(comment);
                     comment_cursor += comment_len;
                     continue;
                 }
             }
-            None => return Err(anyhow!("Corrupted comment: {comment}")),
+            None => {
+                continue;
+                //return Err(anyhow!("Corrupted comment: {comment}"));
+                // skip the corrupted comments for now
+            }
         };
 
         comment_cursor += comment_len;
     }
-    /*
-         7) [framing_bit] = read a single bit as boolean
-         8) if ( [framing_bit] unset or end of packet ) then ERROR
-         9) done.
-    USE CASE FOR READING FRAMING BIT????
-    */
-    if (vorbis_block[comment_cursor - 1] & 0x00000001) == 0 {
-        return Err(anyhow!(
-            "framing bit is 0, lol lmao, everything else works tho"
-        ));
-    };
 
-    Ok(VorbisComment::init(comments))
+    Ok(VorbisComment::init(comments, outcasts))
 }

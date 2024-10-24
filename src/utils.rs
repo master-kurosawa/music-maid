@@ -15,6 +15,11 @@ pub struct TaskQueue {
     executor: JoinHandle<()>,
     sender: Sender<Option<Vec<MusicFile>>>,
 }
+impl Default for TaskQueue {
+    fn default() -> Self {
+        TaskQueue::new()
+    }
+}
 impl TaskQueue {
     pub fn new() -> Self {
         let (sender, mut receiver) = mpsc::channel::<Option<Vec<MusicFile>>>(100);
@@ -70,8 +75,9 @@ impl TaskQueue {
                         date,
                         location,
                         contact,
-                        isrc)
-                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+                        isrc,
+                        outcast)
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
                 )
                 .bind(file_id)
                 .bind(&comment.vendor)
@@ -90,6 +96,7 @@ impl TaskQueue {
                 .bind(&comment.location)
                 .bind(&comment.contact)
                 .bind(&comment.isrc)
+                .bind(&comment.outcast)
                 .execute(&mut *transaction)
                 .await
                 .unwrap();
