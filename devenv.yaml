@@ -6,3 +6,8 @@ inputs:
         follows: nixpkgs
   nixpkgs:
     url: github:cachix/devenv-nixpkgs/rolling
+  mbslave:
+    url: github:master-kurosawa/mbslave
+    inputs:
+      nixpkgs:
+        follows: nixpkgs
