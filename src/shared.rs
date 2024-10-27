@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
 use anyhow::anyhow;
+
+use crate::reader::UringBufReader;
 //use anyhow::anyhow;
 
 pub const VORBIS_FIELDS_LOWER: [&str; 15] = [
@@ -116,16 +118,10 @@ pub struct Picture {
     // picture_data: Vec<u8>,
 }
 
-pub fn parse_vorbis(
-    main_cursor: &usize,
-    buf: &[u8],
-    block_length: usize,
-) -> anyhow::Result<VorbisComment> {
-    let cursor = *main_cursor;
+pub async fn parse_vorbis(vorbis_block: &[u8]) -> anyhow::Result<VorbisComment> {
     let mut comments = HashMap::new();
     let mut outcasts = Vec::new();
-    let vorbis_end = cursor + block_length;
-    let vorbis_block = &buf[cursor..vorbis_end];
+    let block_length = vorbis_block.len();
     let vendor_end = 4 + u32::from_le_bytes(vorbis_block[0..4].try_into()?) as usize;
     comments.insert(
         "vendor".to_string(),
@@ -173,6 +169,9 @@ pub fn parse_vorbis(
     } else {
         let mut comment_cursor = vendor_end + 4;
         for _ in 1..=comment_list_len {
+            if comment_cursor + 4 >= block_length {
+                break;
+            }
             let comment_len =
                 u32::from_le_bytes(vorbis_block[comment_cursor..4 + comment_cursor].try_into()?)
                     as usize;

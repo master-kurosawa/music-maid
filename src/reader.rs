@@ -6,9 +6,9 @@ const BASE_SIZE: usize = 8196;
 pub struct UringBufReader {
     pub buf: Vec<u8>,
     pub cursor: u64,
-    file_ptr: u64,
+    pub file_ptr: u64,
+    pub end_of_file: bool,
     file: File,
-    end_of_file: bool,
 }
 
 impl UringBufReader {
@@ -21,8 +21,8 @@ impl UringBufReader {
             file_ptr: 0u64,
         }
     }
-    pub async fn skip(&mut self, size: u64) -> Result<(), io::Error> {
-        self.cursor += size;
+    pub async fn skip_read(&mut self, skip: u64, size: usize) -> Result<(), io::Error> {
+        self.cursor += skip;
         if self.cursor as usize >= self.buf.len() {
             if self.end_of_file {
                 return Err(io::Error::new(
@@ -30,10 +30,14 @@ impl UringBufReader {
                     "Reached end of file",
                 ));
             }
-            self.read_next(BASE_SIZE).await?;
+            self.read_next(size).await?;
         }
 
         Ok(())
+    }
+    pub async fn skip(&mut self, size: u64) -> Result<(), io::Error> {
+        // skips and allocates 8196 bytes if needed
+        self.skip_read(size, BASE_SIZE).await
     }
     pub async fn read_at_offset(
         &mut self,

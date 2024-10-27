@@ -1,10 +1,8 @@
 use crate::shared::MusicFile;
 
-use anyhow::anyhow;
 use futures::{SinkExt, StreamExt};
 use sqlx::{Pool, Sqlite, SqlitePool};
 use tokio::task::JoinHandle;
-use tokio_uring::fs::File;
 
 use futures::channel::{mpsc, mpsc::Sender};
 const QUEUE_LIMIT: usize = 50;
@@ -142,20 +140,4 @@ impl TaskQueue {
             self.queue.shrink_to_fit();
         }
     }
-}
-
-pub async fn read_ahead_offset(file: &File, size: usize, offset: u64) -> anyhow::Result<Vec<u8>> {
-    let buf = vec![0; size + 8196];
-    let (_res, prefix_buf) = file.read_at(buf, offset).await;
-    Ok(prefix_buf)
-}
-
-pub fn read_u32(cursor: &mut usize, buf: &[u8]) -> anyhow::Result<u32> {
-    let bytes = buf
-        .get(*cursor..*cursor + 4)
-        .ok_or(anyhow!("Buffer too small"))?;
-    *cursor += 4;
-    Ok(u32::from_be_bytes(
-        bytes.try_into().map_err(|_| anyhow!("Invalid slice"))?,
-    ))
 }

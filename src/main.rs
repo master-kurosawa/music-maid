@@ -3,10 +3,11 @@ pub mod reader;
 pub mod shared;
 pub mod utils;
 
-use anyhow::anyhow;
+use anyhow::{anyhow, Context};
 use formats::flac::parse_flac;
 use formats::opus_ogg::parse_ogg_pages;
 use ignore::{WalkBuilder, WalkState};
+use reader::UringBufReader;
 use shared::{MusicFile, Picture, VorbisComment, FLAC_MARKER, OGG_MARKER};
 use sqlx::migrate::MigrateDatabase;
 use sqlx::{Sqlite, SqlitePool};
@@ -27,11 +28,15 @@ async fn read_with_uring(
     let mut vorbis_comments: Vec<VorbisComment> = Vec::new();
     let mut pictures_metadata: Vec<Picture> = Vec::new();
 
-    let buf = vec![0; 8196];
-    let (_res, mut prefix_buf) = file.read_at(buf, 0).await;
-    let bytes_read = _res?;
+    let mut reader = UringBufReader::new(file);
+    let bytes_read = reader.read_next(8196).await?;
 
-    let marker: [u8; 4] = prefix_buf[0..4].try_into().unwrap();
+    let marker: [u8; 4] = reader
+        .get_bytes(4)
+        .await?
+        .try_into()
+        .with_context(|| anyhow!("Empty file"))?;
+
     match marker {
         FLAC_MARKER => {
             if bytes_read < 42 {
@@ -40,13 +45,7 @@ async fn read_with_uring(
                     bytes_read
                 ));
             }
-            parse_flac(
-                prefix_buf,
-                file,
-                &mut vorbis_comments,
-                &mut pictures_metadata,
-            )
-            .await?;
+            parse_flac(&mut reader, &mut vorbis_comments, &mut pictures_metadata).await?;
         }
         OGG_MARKER => {
             if bytes_read < 42 {
@@ -55,13 +54,7 @@ async fn read_with_uring(
                     bytes_read
                 ));
             }
-            parse_ogg_pages(
-                &mut prefix_buf,
-                file,
-                &mut vorbis_comments,
-                &mut pictures_metadata,
-            )
-            .await?;
+            parse_ogg_pages(&mut reader, &mut vorbis_comments, &mut pictures_metadata).await?;
         }
         _ => {}
     }
@@ -83,7 +76,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     sysinfo::set_open_files_limit(10000);
     let paths: Arc<Mutex<Vec<Arc<PathBuf>>>> = Arc::new(Mutex::new(Vec::new()));
     let mut tasks = Vec::new();
-    let builder = WalkBuilder::new("./tmp");
+    let builder = WalkBuilder::new("./corrupted");
     builder.build_parallel().run(|| {
         Box::new(|path| {
             match path {
