@@ -1,4 +1,5 @@
 mod formats;
+pub mod reader;
 pub mod shared;
 pub mod utils;
 
@@ -22,11 +23,12 @@ async fn read_with_uring(
     queue: Arc<tokio::sync::Mutex<TaskQueue>>,
 ) -> anyhow::Result<()> {
     let file = File::open(path).await?;
+
     let mut vorbis_comments: Vec<VorbisComment> = Vec::new();
     let mut pictures_metadata: Vec<Picture> = Vec::new();
 
     let buf = vec![0; 8196];
-    let (_res, prefix_buf) = file.read_at(buf, 0).await;
+    let (_res, mut prefix_buf) = file.read_at(buf, 0).await;
     let bytes_read = _res?;
 
     let marker: [u8; 4] = prefix_buf[0..4].try_into().unwrap();
@@ -54,7 +56,7 @@ async fn read_with_uring(
                 ));
             }
             parse_ogg_pages(
-                prefix_buf,
+                &mut prefix_buf,
                 file,
                 &mut vorbis_comments,
                 &mut pictures_metadata,

@@ -147,10 +147,6 @@ impl TaskQueue {
 pub async fn read_ahead_offset(file: &File, size: usize, offset: u64) -> anyhow::Result<Vec<u8>> {
     let buf = vec![0; size + 8196];
     let (_res, prefix_buf) = file.read_at(buf, offset).await;
-    let bytes_read = _res?;
-    if bytes_read < size + 4 {
-        return Err(anyhow!("Not enough bytes for next header"));
-    }
     Ok(prefix_buf)
 }
 

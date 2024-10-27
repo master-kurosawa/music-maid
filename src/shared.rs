@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+
+use anyhow::anyhow;
 //use anyhow::anyhow;
 
 pub const VORBIS_FIELDS_LOWER: [&str; 15] = [
@@ -50,7 +52,7 @@ pub struct VorbisComment {
     pub outcast: String,
 }
 impl VorbisComment {
-    fn init(map: HashMap<String, String>, outcasts: Vec<String>) -> Self {
+    pub fn init(map: HashMap<String, String>, outcasts: Vec<String>) -> Self {
         let outcast = outcasts.join("|||");
         let vendor = map.get("vendor").map_or(String::new(), |v| v.to_string());
         let contact = map.get("contact").map_or(String::new(), |v| v.to_string());
@@ -129,43 +131,87 @@ pub fn parse_vorbis(
         "vendor".to_string(),
         String::from_utf8_lossy(&vorbis_block[4..vendor_end]).to_string(),
     );
-    let comment_list_len = u32::from_le_bytes(vorbis_block[vendor_end..vendor_end + 4].try_into()?);
-    let mut comment_cursor = vendor_end + 4;
-    for _ in 1..=comment_list_len {
-        let comment_len =
-            u32::from_le_bytes(vorbis_block[comment_cursor..4 + comment_cursor].try_into()?)
-                as usize;
-
-        if comment_len + comment_cursor >= block_length {
-            continue;
-            // skip any corrupted comment lengths
-            //return Err(anyhow!(
-            //    "Corrupted comment length: {comment_len} > {block_length}"
-            //));
-        }
-        comment_cursor += 4;
-        let comment =
-            String::from_utf8_lossy(&vorbis_block[comment_cursor..comment_cursor + comment_len])
-                .to_lowercase();
-        match &comment.split_once('=') {
-            Some((key, val)) => {
-                if VORBIS_FIELDS_LOWER.contains(key) {
-                    comments.insert(key.to_lowercase(), val.to_string());
-                } else {
-                    outcasts.push(comment);
-                    comment_cursor += comment_len;
-                    continue;
+    let comment_list_len =
+        u32::from_le_bytes(vorbis_block[vendor_end..vendor_end + 4].try_into()?) as usize;
+    let first_comment_len =
+        u32::from_le_bytes(vorbis_block[vendor_end + 4..vendor_end + 8].try_into()?) as usize;
+    if comment_list_len > block_length {
+        return Err(anyhow!("Comment list len > block length"));
+    } else if first_comment_len > block_length {
+        let mut comment_cursor = vendor_end;
+        while comment_cursor < block_length {
+            let comment_len =
+                u32::from_le_bytes(vorbis_block[comment_cursor..comment_cursor + 4].try_into()?)
+                    as usize;
+            comment_cursor += 4;
+            if comment_cursor + comment_len >= block_length {
+                break;
+            }
+            let comment = String::from_utf8_lossy(
+                &vorbis_block[comment_cursor..comment_cursor + comment_len],
+            )
+            .to_lowercase();
+            match &comment.split_once('=') {
+                Some((key, val)) => {
+                    if VORBIS_FIELDS_LOWER.contains(key) {
+                        comments.insert(key.to_lowercase(), val.to_string());
+                        comment_cursor += comment_len;
+                    } else {
+                        outcasts.push(comment);
+                        comment_cursor += comment_len;
+                        continue;
+                    }
                 }
-            }
-            None => {
+                None => {
+                    println!("corrupted comment {comment:?}");
+                    continue;
+                    //return Err(anyhow!("Corrupted comment: {comment}"));
+                    // skip the corrupted comments for now
+                }
+            };
+        }
+    } else {
+        let mut comment_cursor = vendor_end + 4;
+        for _ in 1..=comment_list_len {
+            let comment_len =
+                u32::from_le_bytes(vorbis_block[comment_cursor..4 + comment_cursor].try_into()?)
+                    as usize;
+
+            //let z = String::from_utf8_lossy(&vorbis_block[comment_cursor..]);
+            //println!("{z:?}");
+            if comment_len + comment_cursor >= block_length {
+                //println!("{comment_len} + {comment_cursor} > {block_length}");
                 continue;
-                //return Err(anyhow!("Corrupted comment: {comment}"));
-                // skip the corrupted comments for now
+                // skip any corrupted comment lengths
+                //return Err(anyhow!(
+                //    "Corrupted comment length: {comment_len} > {block_length}"
+                //));
             }
-        };
+            comment_cursor += 4;
+            let comment = String::from_utf8_lossy(
+                &vorbis_block[comment_cursor..comment_cursor + comment_len],
+            )
+            .to_lowercase();
+            match &comment.split_once('=') {
+                Some((key, val)) => {
+                    if VORBIS_FIELDS_LOWER.contains(key) {
+                        comments.insert(key.to_lowercase(), val.to_string());
+                    } else {
+                        outcasts.push(comment);
+                        comment_cursor += comment_len;
+                        continue;
+                    }
+                }
+                None => {
+                    println!("corrupted comment {comment:?}");
+                    continue;
+                    //return Err(anyhow!("Corrupted comment: {comment}"));
+                    // skip the corrupted comments for now
+                }
+            };
 
-        comment_cursor += comment_len;
+            comment_cursor += comment_len;
+        }
     }
-
     Ok(VorbisComment::init(comments, outcasts))
 }
