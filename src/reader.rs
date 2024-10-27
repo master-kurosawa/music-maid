@@ -1,10 +1,7 @@
-pub trait UringReader {}
-use std::{io, ops::RangeBounds};
+use std::io::{self, ErrorKind};
 
-use tokio_uring::{
-    buf::{BoundedBuf, Slice},
-    fs::File,
-};
+use tokio_uring::fs::File;
+const BASE_SIZE: usize = 8196;
 
 pub struct UringBufReader {
     pub buf: Vec<u8>,
@@ -24,6 +21,20 @@ impl UringBufReader {
             file_ptr: 0u64,
         }
     }
+    pub async fn skip(&mut self, size: u64) -> Result<(), io::Error> {
+        self.cursor += size;
+        if self.cursor as usize >= self.buf.len() {
+            if self.end_of_file {
+                return Err(io::Error::new(
+                    ErrorKind::UnexpectedEof,
+                    "Reached end of file",
+                ));
+            }
+            self.read_next(BASE_SIZE).await?;
+        }
+
+        Ok(())
+    }
     pub async fn read_at_offset(
         &mut self,
         size: usize,
@@ -33,8 +44,8 @@ impl UringBufReader {
         self.cursor = 0;
         self.file_ptr = offset;
         let (res, _buf) = self.file.read_at(buf, offset).await;
-        if let Some(res) = res.as_ref().ok() {
-            if *res < size {
+        if let Ok(res) = res {
+            if res < size {
                 self.end_of_file = true;
             }
             self.buf = _buf;
@@ -44,8 +55,8 @@ impl UringBufReader {
     pub async fn extend_buf(&mut self, size: usize) -> Result<usize, io::Error> {
         let buf = vec![0; size];
         let (res, _buf) = self.file.read_at(buf, self.buf.len() as u64).await;
-        if let Some(res) = res.as_ref().ok() {
-            if *res < size {
+        if let Ok(res) = res {
+            if res < size {
                 self.end_of_file = true;
             }
             self.buf.extend(_buf);
@@ -58,7 +69,7 @@ impl UringBufReader {
 
     pub async fn get_bytes(&mut self, amount: usize) -> Result<&[u8], io::Error> {
         if self.buf.len() <= amount + self.cursor as usize {
-            self.extend_buf(self.buf.len() - amount - self.cursor as usize)
+            self.extend_buf(amount + self.cursor as usize - self.buf.len())
                 .await?;
             if self.end_of_file {
                 return Ok(self.buf.get(self.cursor as usize..).unwrap());
@@ -68,12 +79,14 @@ impl UringBufReader {
             .buf
             .get(self.cursor as usize..self.cursor as usize + amount)
             .unwrap();
-        self.cursor = self.cursor + amount as u64;
+        self.cursor += amount as u64;
         Ok(slice)
     }
-}
-
-async fn x() {
-    let file = File::open("xd.x").await.unwrap();
-    let z = UringBufReader::new(file);
+    pub async fn read_u32(&mut self) -> Result<u32, io::Error> {
+        let bytes = self.get_bytes(4).await?;
+        if bytes.len() != 4 {
+            return Err(io::Error::new(ErrorKind::UnexpectedEof, "File ended"));
+        }
+        Ok(u32::from_be_bytes(bytes.try_into().unwrap()))
+    }
 }
