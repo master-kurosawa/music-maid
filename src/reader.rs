@@ -21,6 +21,8 @@ impl UringBufReader {
             file_ptr: 0u64,
         }
     }
+    /// skips u64 bytes, then allocates usize bytes if needed
+    /// if cursor is at EOF, returns io::Error
     pub async fn skip_read(&mut self, skip: u64, size: usize) -> Result<(), io::Error> {
         self.cursor += skip;
         if self.cursor as usize >= self.buf.len() {
@@ -35,10 +37,15 @@ impl UringBufReader {
 
         Ok(())
     }
+    /// skips u64 bytes, then allocates 8196 bytes if needed
+    /// if cursor is at EOF, returns io::Error
     pub async fn skip(&mut self, size: u64) -> Result<(), io::Error> {
-        // skips and allocates 8196 bytes if needed
         self.skip_read(size, BASE_SIZE).await
     }
+    /// reads usize bytes at u64 offset.
+    /// self.buf gets replaced by new buffer, use self.extend()
+    /// in case you don't want to replace the current buf
+    /// sets cursor to 0 and file_ptr to offset
     pub async fn read_at_offset(
         &mut self,
         size: usize,
@@ -56,9 +63,13 @@ impl UringBufReader {
         }
         res
     }
+    /// extends the current buffer by usize, reads from file_ptr + buf.len() offset
     pub async fn extend_buf(&mut self, size: usize) -> Result<usize, io::Error> {
         let buf = vec![0; size];
-        let (res, _buf) = self.file.read_at(buf, self.buf.len() as u64).await;
+        let (res, _buf) = self
+            .file
+            .read_at(buf, self.file_ptr + self.buf.len() as u64)
+            .await;
         if let Ok(res) = res {
             if res < size {
                 self.end_of_file = true;
@@ -67,13 +78,18 @@ impl UringBufReader {
         }
         res
     }
+    /// reads size from current file_ptr + cursor
+    /// doesn't read from END OF BUFFER unless cursor is there
     pub async fn read_next(&mut self, size: usize) -> Result<usize, io::Error> {
         self.read_at_offset(size, self.file_ptr + self.cursor).await
     }
 
+    /// gets usize bytes from the current buffer, extending it if needed
+    /// extends by missing amount + additional 8196 bytes
+    /// returns rest of the buffer if it reaches EOF
     pub async fn get_bytes(&mut self, amount: usize) -> Result<&[u8], io::Error> {
         if self.buf.len() <= amount + self.cursor as usize {
-            self.extend_buf(amount + self.cursor as usize - self.buf.len())
+            self.extend_buf(amount + self.cursor as usize - self.buf.len() + BASE_SIZE)
                 .await?;
             if self.end_of_file {
                 return Ok(self.buf.get(self.cursor as usize..).unwrap());
@@ -86,6 +102,7 @@ impl UringBufReader {
         self.cursor += amount as u64;
         Ok(slice)
     }
+    /// reads next 4 bytes into BE u32
     pub async fn read_u32(&mut self) -> Result<u32, io::Error> {
         let bytes = self.get_bytes(4).await?;
         if bytes.len() != 4 {
