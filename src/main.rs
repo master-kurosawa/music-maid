@@ -76,7 +76,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     sysinfo::set_open_files_limit(10000);
     let paths: Arc<Mutex<Vec<Arc<PathBuf>>>> = Arc::new(Mutex::new(Vec::new()));
     let mut tasks = Vec::new();
-    let builder = WalkBuilder::new("./corrupted");
+    let builder = WalkBuilder::new("./tmp");
     builder.build_parallel().run(|| {
         Box::new(|path| {
             match path {

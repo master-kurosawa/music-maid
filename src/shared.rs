@@ -25,6 +25,9 @@ pub const VORBIS_FIELDS_LOWER: [&str; 15] = [
 
 pub const FLAC_MARKER: [u8; 4] = [0x66, 0x4C, 0x61, 0x43];
 pub const OGG_MARKER: [u8; 4] = [0x4F, 0x67, 0x67, 0x53];
+// Used for checking if 4 byte list length is present in vorbis.
+// 0x20 is space ' ' symbol. Smallest utf-8 printable one
+pub const SMALLEST_VORBIS_4BYTE_POSSIBLE: u32 = u32::from_le_bytes([0x20, 0x20, 0x20, 0x20]);
 
 #[derive(Debug, Clone)]
 pub struct MusicFile {
@@ -118,6 +121,9 @@ pub struct Picture {
     // picture_data: Vec<u8>,
 }
 
+//
+// pub fn determine_vorbis_type
+
 pub async fn parse_vorbis(vorbis_block: &[u8]) -> anyhow::Result<VorbisComment> {
     let mut comments = HashMap::new();
     let mut outcasts = Vec::new();
@@ -133,39 +139,6 @@ pub async fn parse_vorbis(vorbis_block: &[u8]) -> anyhow::Result<VorbisComment> 
         u32::from_le_bytes(vorbis_block[vendor_end + 4..vendor_end + 8].try_into()?) as usize;
     if comment_list_len > block_length {
         return Err(anyhow!("Comment list len > block length"));
-    } else if first_comment_len > block_length {
-        let mut comment_cursor = vendor_end;
-        while comment_cursor < block_length {
-            let comment_len =
-                u32::from_le_bytes(vorbis_block[comment_cursor..comment_cursor + 4].try_into()?)
-                    as usize;
-            comment_cursor += 4;
-            if comment_cursor + comment_len >= block_length {
-                break;
-            }
-            let comment = String::from_utf8_lossy(
-                &vorbis_block[comment_cursor..comment_cursor + comment_len],
-            )
-            .to_lowercase();
-            match &comment.split_once('=') {
-                Some((key, val)) => {
-                    if VORBIS_FIELDS_LOWER.contains(key) {
-                        comments.insert(key.to_lowercase(), val.to_string());
-                        comment_cursor += comment_len;
-                    } else {
-                        outcasts.push(comment);
-                        comment_cursor += comment_len;
-                        continue;
-                    }
-                }
-                None => {
-                    println!("corrupted comment {comment:?}");
-                    continue;
-                    //return Err(anyhow!("Corrupted comment: {comment}"));
-                    // skip the corrupted comments for now
-                }
-            };
-        }
     } else {
         let mut comment_cursor = vendor_end + 4;
         for _ in 1..=comment_list_len {

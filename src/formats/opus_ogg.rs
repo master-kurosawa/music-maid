@@ -1,10 +1,12 @@
+use core::slice::SlicePattern;
 use std::io;
 
+use anyhow::anyhow;
 use tokio_uring::fs::File;
 
 use crate::{
     reader::UringBufReader,
-    shared::{parse_vorbis, Picture, VorbisComment, OGG_MARKER},
+    shared::{parse_vorbis, Picture, VorbisComment, OGG_MARKER, SMALLEST_VORBIS_4BYTE_POSSIBLE},
 };
 
 const MAX_OGG_PAGE_SIZE: usize = 65_307;
@@ -42,7 +44,14 @@ async fn parse_ogg_vorbis(reader: &mut UringBufReader) -> Result<Vec<u8>, io::Er
         let mut segment_cursor = 0;
         if segment[0..8] == OPUS_TAGS_MARKER {
             segment_cursor += 8; // opus tags appears only once inside second page
+                                 // TODO check if list eleemnt amount is present inside vorbis
+                                 // if it is (which it should) then its possible to extract comments that appear after
+                                 // image. Requires skipping vendor len and string, however those can be longer than
+                                 // current segment (thanks ogg).
+                                 //
+                                 // let vendor_len = [segment_cursor..segment_cursor + 4];
         }
+
         // mpv doesnt handle anything else than fully UPPER or LOWER keys
         // so we wont aswell
         let find_vorbis_picture = segment[segment_cursor..].windows(22).position(|window| {
@@ -183,6 +192,49 @@ async fn position_ogg_page(
             }
         };
     }
+}
+
+async fn parse_ogg_vorbis_z(reader: &mut UringBufReader) -> anyhow::Result<()> {
+    let header_prefix = reader.get_bytes(27).await?;
+    let header: usize = header_prefix[5].into();
+    let segment_len: usize = header_prefix[26].into();
+    let segment_total = reader
+        .get_bytes(segment_len)
+        .await?
+        .iter()
+        .fold(0, |acc, x| acc + *x as usize);
+    if header >= 4 {
+        reader.read_next(segment_total).await?;
+    } else if segment_total < MAX_OGG_PAGE_SIZE / 2 {
+        reader.read_next(segment_total * 5).await?;
+    } else {
+        reader.read_next(segment_total * 2).await?;
+    }
+    if reader.get_bytes(8).await? != OPUS_TAGS_MARKER {
+        // probably just skip file later
+        return Err(anyhow!("Couldn't find opus marker."));
+    }
+    let vendor_len = u32::from_le_bytes(reader.get_bytes(4).await?.try_into().unwrap());
+    let vendor = if vendor_len > segment_total as u32 - 12 {
+        let part = reader.get_bytes(segment_total - 12).await?.to_vec();
+        let rest = parse_ogg_page(reader).await?;
+        let mut result = Vec::with_capacity(part.len() + rest.len());
+        result.extend(part);
+        result.extend(rest);
+        result
+    } else {
+        reader.get_bytes(vendor_len as usize).await?.to_vec()
+    };
+    let comment_amount = u32::from_le_bytes(reader.get_bytes(4).await?.try_into().unwrap());
+    let first_comment_len = u32::from_le_bytes(reader.get_bytes(4).await?.try_into().unwrap());
+    if first_comment_len > SMALLEST_VORBIS_4BYTE_POSSIBLE
+    loop {
+        if header >= 4 {
+            break;
+        }
+    }
+
+    Ok(())
 }
 
 async fn parse_ogg_page(reader: &mut UringBufReader) -> Result<Vec<u8>, io::Error> {
