@@ -5,7 +5,11 @@
   inputs,
   ...
 }: {
-  packages = with pkgs; [sqlitebrowser openssl];
+  packages = with pkgs; [sqlx-cli sqlitebrowser openssl];
+  enterShell = ''
+    export DATABASE_URL=sqlite://dev.db
+    sqlx database setup
+  ''; 
   languages.rust = {
     enable = true;
     channel = "nightly";
