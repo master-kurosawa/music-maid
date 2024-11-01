@@ -1,16 +1,18 @@
+pub mod db;
 mod formats;
 pub mod reader;
-pub mod shared;
 pub mod utils;
 
 use anyhow::{anyhow, Context};
-use formats::flac::parse_flac;
+use db::{
+    audio_file::AudioFile,
+    picture::Picture,
+    vorbis::{VorbisComment, FLAC_MARKER},
+};
 use formats::opus_ogg::parse_ogg_pages;
+use formats::{flac::parse_flac, opus_ogg::OGG_MARKER};
 use ignore::{WalkBuilder, WalkState};
 use reader::UringBufReader;
-use shared::{MusicFile, Picture, VorbisComment, FLAC_MARKER, OGG_MARKER};
-use sqlx::migrate::MigrateDatabase;
-use sqlx::{Sqlite, SqlitePool};
 use std::{
     error::Error,
     path::{Path, PathBuf},
@@ -27,8 +29,9 @@ async fn read_with_uring(
 
     let mut vorbis_comments: Vec<VorbisComment> = Vec::new();
     let mut pictures_metadata: Vec<Picture> = Vec::new();
+    let mut format: Option<String> = None;
 
-    let mut reader = UringBufReader::new(file);
+    let mut reader = UringBufReader::new(file, path.to_string_lossy().to_string());
     let bytes_read = reader.read_next(8196).await?;
 
     let marker: [u8; 4] = reader
@@ -45,6 +48,7 @@ async fn read_with_uring(
                     bytes_read
                 ));
             }
+            format = Some("flac".to_owned());
             parse_flac(&mut reader, &mut vorbis_comments, &mut pictures_metadata).await?;
         }
         OGG_MARKER => {
@@ -54,21 +58,25 @@ async fn read_with_uring(
                     bytes_read
                 ));
             }
-            parse_ogg_pages(&mut reader, &mut vorbis_comments, &mut pictures_metadata).await?;
+            format = Some(
+                parse_ogg_pages(&mut reader, &mut vorbis_comments, &mut pictures_metadata).await?,
+            );
         }
         _ => {}
     }
 
-    let path = path.to_string_lossy().to_string();
     queue
         .lock()
         .await
-        .push(MusicFile {
-            path,
+        .push(AudioFile {
+            path: path.to_string_lossy().to_string(),
+            name: path.file_name().unwrap().to_string_lossy().to_string(),
+            format,
             comments: vorbis_comments,
             pictures: pictures_metadata,
         })
         .await;
+
     Ok(())
 }
 
@@ -94,63 +102,6 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         })
     });
     tokio_uring::start(async {
-        let url = "sqlite://music.db";
-        if !Sqlite::database_exists(url).await.unwrap_or(false) {
-            Sqlite::create_database(url).await.unwrap();
-        }
-
-        let pool = SqlitePool::connect(url).await.unwrap();
-        sqlx::query(
-            "
-    CREATE TABLE IF NOT EXISTS vorbis_comments (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        file_id INTEGER NOT NULL,
-        vendor TEXT NOT NULL,
-        title TEXT NOT NULL,
-        version TEXT NOT NULL,
-        album TEXT NOT NULL,
-        tracknumber TEXT NOT NULL,
-        artist TEXT NOT NULL,
-        performer TEXT NOT NULL,
-        copyright TEXT NOT NULL,
-        license TEXT NOT NULL,
-        organization TEXT NOT NULL,
-        description TEXT NOT NULL,
-        genre TEXT NOT NULL,
-        date TEXT NOT NULL,
-        location TEXT NOT NULL,
-        contact TEXT NOT NULL,
-        isrc TEXT NOT NULL,
-        outcast TEXT NOT NULL,
-        FOREIGN KEY (file_id) REFERENCES files(id)
-    );
-",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS files (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    path TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS picture_metadata(
-        file_id INTEGER NOT NULL,
-        picture_type INTEGER NOT NULL,
-        mime TEXT NOT NULL,
-        description TEXT NOT NULL,
-        width INTEGER NOT NULL,
-        height INTEGER NOT NULL,
-        color_depth INTEGER NOT NULL,
-        indexed_color_number INTEGER NOT NULL,
-        size INTEGER NOT NULL,
-        FOREIGN KEY (file_id) REFERENCES files(id)
-);
-",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
         let queue = Arc::new(tokio::sync::Mutex::new(TaskQueue::new()));
         for entry in paths.lock().into_iter() {
             entry.clone().into_iter().for_each(|path| {
@@ -162,7 +113,10 @@ CREATE TABLE IF NOT EXISTS picture_metadata(
             });
         }
         for task in tasks {
-            task.await.unwrap();
+            let t = task.await;
+            if let Err(t) = t {
+                println!("{t:?}");
+            }
         }
         let q = Arc::try_unwrap(queue).unwrap().into_inner();
         TaskQueue::finish(q).await;

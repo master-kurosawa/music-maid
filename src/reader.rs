@@ -5,6 +5,7 @@ const BASE_SIZE: usize = 8196;
 
 pub struct UringBufReader {
     pub buf: Vec<u8>,
+    pub path: String,
     pub cursor: u64,
     pub file_ptr: u64,
     pub end_of_file: bool,
@@ -12,10 +13,11 @@ pub struct UringBufReader {
 }
 
 impl UringBufReader {
-    pub fn new(file: File) -> Self {
+    pub fn new(file: File, path: String) -> Self {
         UringBufReader {
             buf: Vec::new(),
             file,
+            path,
             end_of_file: false,
             cursor: 0u64,
             file_ptr: 0u64,

@@ -1,17 +1,18 @@
-use crate::shared::MusicFile;
-
 use futures::{SinkExt, StreamExt};
 use sqlx::{Pool, Sqlite, SqlitePool};
 use tokio::task::JoinHandle;
 
 use futures::channel::{mpsc, mpsc::Sender};
+
+use crate::db::audio_file::AudioFile;
+
 const QUEUE_LIMIT: usize = 50;
 
 #[derive(Debug)]
 pub struct TaskQueue {
-    queue: Vec<MusicFile>,
+    queue: Vec<AudioFile>,
     executor: JoinHandle<()>,
-    sender: Sender<Option<Vec<MusicFile>>>,
+    sender: Sender<Option<Vec<AudioFile>>>,
 }
 impl Default for TaskQueue {
     fn default() -> Self {
@@ -20,9 +21,9 @@ impl Default for TaskQueue {
 }
 impl TaskQueue {
     pub fn new() -> Self {
-        let (sender, mut receiver) = mpsc::channel::<Option<Vec<MusicFile>>>(100);
+        let (sender, mut receiver) = mpsc::channel::<Option<Vec<AudioFile>>>(100);
         let executor = tokio::spawn(async move {
-            let pool = SqlitePool::connect("sqlite://music.db").await.unwrap();
+            let pool = SqlitePool::connect("sqlite://dev.db").await.unwrap();
             while let Some(queue) = receiver.next().await {
                 match queue {
                     Some(queue) => TaskQueue::insert(queue, &pool).await,
@@ -43,96 +44,20 @@ impl TaskQueue {
         self.queue.to_owned().shrink_to_fit();
         let _ = self.executor.await;
     }
-    pub async fn insert(queue: Vec<MusicFile>, pool: &Pool<Sqlite>) {
+    pub async fn insert(queue: Vec<AudioFile>, pool: &Pool<Sqlite>) {
         let mut transaction = pool.begin().await.unwrap();
         for item in queue {
-            let file_id = sqlx::query("INSERT INTO files(path) VALUES(?);")
-                .bind(&item.path)
-                .execute(&mut *transaction)
-                .await
-                .unwrap()
-                .last_insert_rowid();
-            for comment in &item.comments {
-                sqlx::query(
-                    "
-                    INSERT INTO 
-                    vorbis_comments(
-                        file_id,
-                        vendor,
-                        title,
-                        version,
-                        album,
-                        tracknumber,
-                        artist,
-                        performer,
-                        copyright,
-                        license,
-                        organization,
-                        description,
-                        genre,
-                        date,
-                        location,
-                        contact,
-                        isrc,
-                        outcast)
-                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
-                )
-                .bind(file_id)
-                .bind(&comment.vendor)
-                .bind(&comment.title)
-                .bind(&comment.version)
-                .bind(&comment.album)
-                .bind(&comment.tracknumber)
-                .bind(&comment.artist)
-                .bind(&comment.performer)
-                .bind(&comment.copyright)
-                .bind(&comment.license)
-                .bind(&comment.organization)
-                .bind(&comment.description)
-                .bind(&comment.genre)
-                .bind(&comment.date)
-                .bind(&comment.location)
-                .bind(&comment.contact)
-                .bind(&comment.isrc)
-                .bind(&comment.outcast)
-                .execute(&mut *transaction)
-                .await
-                .unwrap();
+            let file_id = item.insert(&mut *transaction).await.unwrap();
+            for comment in item.comments {
+                comment.insert(file_id, &mut *transaction).await.unwrap();
             }
-            for picture in &item.pictures {
-                sqlx::query(
-                    "
-                    INSERT INTO 
-                    picture_metadata(
-                        file_id,
-                        picture_type,
-                        mime,
-                        description,
-                        width,
-                        height,
-                        color_depth,
-                        indexed_color_number,
-                        size
-                        )
-                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?);",
-                )
-                .bind(file_id)
-                .bind(picture.picture_type)
-                .bind(&picture.mime)
-                .bind(&picture.description)
-                .bind(picture.width)
-                .bind(picture.height)
-                .bind(picture.color_depth)
-                .bind(picture.indexed_color_number)
-                .bind(picture.size)
-                .execute(&mut *transaction)
-                .await
-                .unwrap();
+            for picture in item.pictures {
+                picture.insert(file_id, &mut *transaction).await.unwrap();
             }
         }
         transaction.commit().await.unwrap();
     }
-    pub async fn push(&mut self, item: MusicFile) {
+    pub async fn push(&mut self, item: AudioFile) {
         self.queue.push(item);
         if self.queue.len() >= QUEUE_LIMIT {
             let _ = self.sender.send(Some(self.queue.clone())).await;

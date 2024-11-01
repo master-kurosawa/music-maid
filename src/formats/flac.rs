@@ -1,6 +1,6 @@
 use crate::{
+    db::{picture::Picture, vorbis::VorbisComment},
     reader::UringBufReader,
-    shared::{parse_vorbis, Picture, VorbisComment},
 };
 use anyhow::anyhow;
 
@@ -42,18 +42,19 @@ pub async fn parse_flac(
                         "Not enough bytes for vorbis block. Length: {block_length}"
                     ));
                 }
-                let comment = parse_vorbis(vorbis_block).await?;
-                vorbis_comments.push(comment);
+
+                vorbis_comments.push(VorbisComment::parse_block(vorbis_block).await?);
             }
             VORBIS_COMMENT_MARKER::END_OF_BLOCK => {
                 let vorbis_block = reader.get_bytes(block_length).await?;
+
                 if vorbis_block.len() < block_length {
                     return Err(anyhow!(
                         "Not enough bytes for vorbis block. Length: {block_length}"
                     ));
                 }
-                let comment = parse_vorbis(vorbis_block).await?;
-                vorbis_comments.push(comment);
+
+                vorbis_comments.push(VorbisComment::parse_block(vorbis_block).await?);
                 break;
             }
             PICTURE_MARKER::MARKER => {
