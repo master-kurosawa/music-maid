@@ -13,3 +13,7 @@ tmp/
 # Added by cargo
 
 /target
+
+example.db
+dev.db
+music.db
