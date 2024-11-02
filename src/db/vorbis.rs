@@ -27,6 +27,7 @@ pub const VORBIS_FIELDS_LOWER: [&str; 15] = [
 
 #[derive(Debug, Clone, FromRow)]
 pub struct VorbisComment {
+    pub id: Option<i64>,
     pub file_id: Option<i64>,
     pub vendor: String,
     pub title: String,
@@ -48,12 +49,26 @@ pub struct VorbisComment {
 }
 
 impl VorbisComment {
+    pub async fn from_file_id<'a, E>(file_id: i64, pool: E) -> Result<Vec<Self>, sqlx::Error>
+    where
+        E: Executor<'a, Database = Sqlite>,
+    {
+        sqlx::query_as!(
+            Self,
+            "SELECT * FROM vorbis_comments WHERE file_id = ?",
+            file_id
+        )
+        .fetch_all(pool)
+        .await
+    }
+
     pub fn init(map: HashMap<String, String>, outcasts: Vec<String>) -> Self {
         let outcast = outcasts.join("|||");
 
         let get_value = |key: &str| map.get(key).unwrap_or(&String::new()).clone();
 
         VorbisComment {
+            id: None,
             file_id: None,
             vendor: get_value("vendor"),
             title: get_value("title"),

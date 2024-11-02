@@ -2,22 +2,37 @@ use sqlx::{prelude::FromRow, Executor, Sqlite};
 
 #[derive(Debug, Clone, FromRow)]
 pub struct Picture {
+    pub id: Option<i64>,
     pub file_id: Option<i64>,
     pub file_ptr: i64,
-    pub picture_type: u32,
+    pub picture_type: i64,
     pub mime: String,
     pub description: String,
-    pub width: u32,
-    pub height: u32,
-    pub color_depth: u32,
-    pub indexed_color_number: u32,
-    pub size: u32,
+    pub width: i64,
+    pub height: i64,
+    pub color_depth: i64,
+    pub indexed_color_number: i64,
+    pub size: i64,
 }
 
 impl Picture {
+    pub async fn from_file_id<'a, E>(file_id: i64, pool: E) -> Result<Vec<Self>, sqlx::Error>
+    where
+        E: Executor<'a, Database = Sqlite>,
+    {
+        sqlx::query_as!(
+            Self,
+            "SELECT * FROM picture_metadata WHERE file_id = ?",
+            file_id
+        )
+        .fetch_all(pool)
+        .await
+    }
+
     pub fn from_picture_block(picture: &[u8], file_ptr: i64) -> Self {
         let mut cursor = 0;
-        let get_u32 = |bytes: &[u8]| -> u32 { u32::from_be_bytes(bytes.try_into().unwrap()) };
+        let get_u32 =
+            |bytes: &[u8]| -> i64 { u32::from_be_bytes(bytes.try_into().unwrap()) as i64 };
 
         let picture_type = get_u32(&picture[cursor..cursor + 4]);
         cursor += 4;
@@ -45,6 +60,7 @@ impl Picture {
         let picture_len = get_u32(&picture[cursor..cursor + 4]);
 
         Picture {
+            id: None,
             file_id: None,
             file_ptr,
             picture_type,

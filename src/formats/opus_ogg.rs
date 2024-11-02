@@ -203,6 +203,7 @@ async fn parse_opus_vorbis<'a>(
             let padding_len = ogg_reader.parse_till_end().await?.len();
             if padding_len > 0 {
                 padding = Some(Padding {
+                    id: None,
                     file_id: None,
                     byte_size: Some(padding_len as i64),
                     file_ptr: Some(file_ptr as i64),

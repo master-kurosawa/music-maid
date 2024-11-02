@@ -5,7 +5,7 @@ pub mod reader;
 
 use anyhow::{anyhow, Context};
 use db::{
-    audio_file::AudioFile,
+    audio_file::{AudioFile, AudioFileMeta},
     padding::Padding,
     picture::Picture,
     vorbis::{VorbisComment, FLAC_MARKER},
@@ -15,7 +15,9 @@ use formats::{flac::parse_flac, opus_ogg::OGG_MARKER};
 use ignore::{WalkBuilder, WalkState};
 use queue::TaskQueue;
 use reader::UringBufReader;
+use sqlx::SqlitePool;
 use std::{
+    env,
     error::Error,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -80,13 +82,17 @@ async fn read_with_uring(
         _ => {}
     }
 
+    let audio_file = AudioFile {
+        id: None,
+        path: path.to_string_lossy().to_string(),
+        name: path.file_name().unwrap().to_string_lossy().to_string(),
+        format,
+    };
     queue
         .lock()
         .await
-        .push(AudioFile {
-            path: path.to_string_lossy().to_string(),
-            name: path.file_name().unwrap().to_string_lossy().to_string(),
-            format,
+        .push(AudioFileMeta {
+            audio_file,
             comments: vorbis_comments,
             pictures: pictures_metadata,
             paddings,
@@ -98,6 +104,18 @@ async fn read_with_uring(
 
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     sysinfo::set_open_files_limit(10000);
+    if env::args().last().unwrap() == "write" {
+        let crazy_path = "./tmp/dir1/dir1/dir2/dir3/dir4/dir5/dir6/dir7/dir8/dir9/dir10/dir11/dir12/dir13/dir14/dir15/dir16/dir17/dir18/dir19/dir20/dir21/dir22/dir23/dir24/dir25/dir26/dir27/dir28/dir29/dir30/seq6/output.opus".to_owned();
+
+        tokio_uring::start(async {
+            let pool = SqlitePool::connect("sqlite://dev.db").await.unwrap();
+            let file = AudioFile::from_path(crazy_path, &pool).await.unwrap();
+            let file = file.fetch_meta(&pool).await.unwrap();
+            println!("{file:?}");
+        });
+        return Ok(());
+    }
+
     let paths: Arc<Mutex<Vec<Arc<PathBuf>>>> = Arc::new(Mutex::new(Vec::new()));
     let mut tasks = Vec::new();
     let builder = WalkBuilder::new("./tmp");

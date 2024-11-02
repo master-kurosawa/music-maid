@@ -67,6 +67,7 @@ pub async fn parse_flac(
             }
             PADDING_MARKER::MARKER => {
                 paddings.push(Padding {
+                    id: None,
                     file_id: None,
                     file_ptr: Some((reader.file_ptr + reader.cursor) as i64),
                     byte_size: Some(block_length as i64),
@@ -74,6 +75,13 @@ pub async fn parse_flac(
                 reader.skip(block_length as u64).await?;
             }
             PADDING_MARKER::END_OF_BLOCK => {
+                paddings.push(Padding {
+                    id: None,
+                    file_id: None,
+                    file_ptr: Some((reader.file_ptr + reader.cursor) as i64),
+                    byte_size: Some(block_length as i64),
+                });
+
                 break;
             }
             n if n >= 128 => {
@@ -109,15 +117,16 @@ async fn parse_picture(reader: &mut UringBufReader) -> anyhow::Result<Picture> {
     reader.skip(picture_len as u64).await?;
 
     Ok(Picture {
+        id: None,
         file_id: None,
         file_ptr,
-        picture_type,
-        size: picture_len,
+        picture_type: picture_type as i64,
+        size: picture_len as i64,
         mime,
         description,
-        width,
-        height,
-        color_depth,
-        indexed_color_number,
+        width: width as i64,
+        height: height as i64,
+        color_depth: color_depth as i64,
+        indexed_color_number: indexed_color_number as i64,
     })
 }
