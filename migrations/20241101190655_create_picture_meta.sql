@@ -1,6 +1,7 @@
 CREATE TABLE IF NOT EXISTS picture_metadata(
-        file_id INTEGER NOT NULL,
-        file_ptr INTEGER,
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_id INTEGER,
+        file_ptr INTEGER NOT NULL,
         picture_type INTEGER NOT NULL,
         mime TEXT NOT NULL,
         description TEXT NOT NULL,
