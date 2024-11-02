@@ -25,13 +25,13 @@ impl Picture {
         let mime_len = get_u32(&picture[cursor..cursor + 4]) as usize;
         cursor += 4;
         let mime_bytes = &picture[cursor..mime_len + cursor];
-        let mime = String::from_utf8_lossy(&mime_bytes).to_string();
+        let mime = String::from_utf8_lossy(mime_bytes).to_string();
         cursor += mime_len;
 
         let description_len = get_u32(&picture[cursor..cursor + 4]) as usize;
         cursor += 4;
         let description_bytes = &picture[cursor..description_len + cursor];
-        let description = String::from_utf8_lossy(&description_bytes).to_string();
+        let description = String::from_utf8_lossy(description_bytes).to_string();
         cursor += description_len;
 
         let width = get_u32(&picture[cursor..cursor + 4]);
