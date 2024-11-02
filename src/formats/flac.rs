@@ -89,6 +89,7 @@ pub async fn parse_flac(
     Ok(())
 }
 async fn parse_picture(reader: &mut UringBufReader) -> anyhow::Result<Picture> {
+    let file_ptr = (reader.cursor + reader.file_ptr) as i64;
     let picture_type = reader.read_u32().await?;
 
     let mime_len = reader.read_u32().await? as usize;
@@ -109,6 +110,7 @@ async fn parse_picture(reader: &mut UringBufReader) -> anyhow::Result<Picture> {
 
     Ok(Picture {
         file_id: None,
+        file_ptr,
         picture_type,
         size: picture_len,
         mime,
