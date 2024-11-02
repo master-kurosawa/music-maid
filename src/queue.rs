@@ -32,7 +32,7 @@ impl TaskQueue {
             }
         });
         TaskQueue {
-            queue: Vec::new(),
+            queue: Vec::with_capacity(50),
             executor,
             sender,
         }
@@ -65,7 +65,6 @@ impl TaskQueue {
         if self.queue.len() >= QUEUE_LIMIT {
             let _ = self.sender.send(Some(self.queue.clone())).await;
             self.queue.clear();
-            self.queue.shrink_to_fit();
         }
     }
 }
