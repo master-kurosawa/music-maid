@@ -1,17 +1,19 @@
 pub mod db;
 mod formats;
+pub mod queue;
 pub mod reader;
-pub mod utils;
 
 use anyhow::{anyhow, Context};
 use db::{
     audio_file::AudioFile,
+    padding::Padding,
     picture::Picture,
     vorbis::{VorbisComment, FLAC_MARKER},
 };
 use formats::opus_ogg::parse_ogg_pages;
 use formats::{flac::parse_flac, opus_ogg::OGG_MARKER};
 use ignore::{WalkBuilder, WalkState};
+use queue::TaskQueue;
 use reader::UringBufReader;
 use std::{
     error::Error,
@@ -19,7 +21,6 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tokio_uring::fs::File;
-use utils::TaskQueue;
 
 async fn read_with_uring(
     path: &Path,
@@ -29,6 +30,8 @@ async fn read_with_uring(
 
     let mut vorbis_comments: Vec<VorbisComment> = Vec::new();
     let mut pictures_metadata: Vec<Picture> = Vec::new();
+    let mut paddings: Vec<Padding> = Vec::new();
+
     let mut format: Option<String> = None;
 
     let mut reader = UringBufReader::new(file, path.to_string_lossy().to_string());
@@ -49,7 +52,13 @@ async fn read_with_uring(
                 ));
             }
             format = Some("flac".to_owned());
-            parse_flac(&mut reader, &mut vorbis_comments, &mut pictures_metadata).await?;
+            parse_flac(
+                &mut reader,
+                &mut vorbis_comments,
+                &mut pictures_metadata,
+                &mut paddings,
+            )
+            .await?;
         }
         OGG_MARKER => {
             if bytes_read < 42 {
@@ -59,7 +68,13 @@ async fn read_with_uring(
                 ));
             }
             format = Some(
-                parse_ogg_pages(&mut reader, &mut vorbis_comments, &mut pictures_metadata).await?,
+                parse_ogg_pages(
+                    &mut reader,
+                    &mut vorbis_comments,
+                    &mut pictures_metadata,
+                    &mut paddings,
+                )
+                .await?,
             );
         }
         _ => {}
@@ -74,6 +89,7 @@ async fn read_with_uring(
             format,
             comments: vorbis_comments,
             pictures: pictures_metadata,
+            paddings,
         })
         .await;
 
@@ -93,8 +109,8 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                         return WalkState::Continue;
                     }
                     let path = Arc::new(entry.path().to_path_buf());
-                    let clone_xd = Arc::clone(&paths);
-                    clone_xd.lock().unwrap().push(path);
+                    let paths = Arc::clone(&paths);
+                    paths.lock().unwrap().push(path);
                 }
                 Err(_) => panic!(),
             }

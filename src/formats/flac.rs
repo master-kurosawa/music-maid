@@ -1,5 +1,5 @@
 use crate::{
-    db::{picture::Picture, vorbis::VorbisComment},
+    db::{padding::Padding, picture::Picture, vorbis::VorbisComment},
     reader::UringBufReader,
 };
 use anyhow::anyhow;
@@ -29,6 +29,7 @@ pub async fn parse_flac(
     reader: &mut UringBufReader,
     vorbis_comments: &mut Vec<VorbisComment>,
     pictures_metadata: &mut Vec<Picture>,
+    paddings: &mut Vec<Padding>,
 ) -> anyhow::Result<()> {
     loop {
         let header = reader.get_bytes(4).await?;
@@ -65,6 +66,11 @@ pub async fn parse_flac(
                 break;
             }
             PADDING_MARKER::MARKER => {
+                paddings.push(Padding {
+                    file_id: None,
+                    file_ptr: Some((reader.file_ptr + reader.cursor) as i64),
+                    byte_size: Some(block_length as i64),
+                });
                 reader.skip(block_length as u64).await?;
             }
             PADDING_MARKER::END_OF_BLOCK => {
@@ -102,6 +108,7 @@ async fn parse_picture(reader: &mut UringBufReader) -> anyhow::Result<Picture> {
     reader.skip(picture_len as u64).await?;
 
     Ok(Picture {
+        file_id: None,
         picture_type,
         size: picture_len,
         mime,

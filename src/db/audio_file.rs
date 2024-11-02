@@ -1,6 +1,6 @@
 use sqlx::{Executor, Sqlite};
 
-use super::{picture::Picture, vorbis::VorbisComment};
+use super::{padding::Padding, picture::Picture, vorbis::VorbisComment};
 
 #[derive(Debug, Clone)]
 pub struct AudioFile {
@@ -9,6 +9,7 @@ pub struct AudioFile {
     pub format: Option<String>,
     pub comments: Vec<VorbisComment>,
     pub pictures: Vec<Picture>,
+    pub paddings: Vec<Padding>,
 }
 
 impl AudioFile {

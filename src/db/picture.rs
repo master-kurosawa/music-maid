@@ -2,6 +2,7 @@ use sqlx::{prelude::FromRow, Executor, Sqlite};
 
 #[derive(Debug, Clone, FromRow)]
 pub struct Picture {
+    pub file_id: Option<i64>,
     pub picture_type: u32,
     pub mime: String,
     pub description: String,

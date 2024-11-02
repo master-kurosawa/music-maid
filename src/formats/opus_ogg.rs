@@ -5,6 +5,7 @@ use anyhow::anyhow;
 pub const OGG_MARKER: [u8; 4] = [0x4F, 0x67, 0x67, 0x53];
 use crate::{
     db::{
+        padding::Padding,
         picture::Picture,
         vorbis::{VorbisComment, SMALLEST_VORBIS_4BYTE_POSSIBLE, VORBIS_FIELDS_LOWER},
     },
@@ -162,9 +163,10 @@ impl<'a> OggPageReader<'a> {
 
 async fn parse_opus_vorbis<'a>(
     ogg_reader: &mut OggPageReader<'a>,
-) -> anyhow::Result<VorbisComment> {
+) -> anyhow::Result<(VorbisComment, Option<Padding>)> {
     let mut comments = HashMap::new();
     let mut outcasts = Vec::new();
+    let mut padding: Option<Padding> = None;
 
     let vendor_bytes: [u8; 4] = ogg_reader.get_bytes(4).await?.try_into().unwrap();
     let vendor_len = u32::from_le_bytes(vendor_bytes);
@@ -194,10 +196,16 @@ async fn parse_opus_vorbis<'a>(
             // padding found
             ogg_reader.reader.cursor -= 4;
             ogg_reader.cursor -= 4;
-            let pad = ogg_reader.parse_till_end().await?.len();
+            let file_ptr = ogg_reader.reader.file_ptr + ogg_reader.reader.cursor;
+            let padding_len = ogg_reader.parse_till_end().await?.len();
+            if padding_len > 0 {
+                padding = Some(Padding {
+                    file_id: None,
+                    byte_size: Some(padding_len as i64),
+                    file_ptr: Some(file_ptr as i64),
+                });
+            }
 
-            //let z = String::from_utf8_lossy(&pad);
-            //println!("{pad:?}");
             break;
         }
         if comment_len > VORBIS_SIZE_LIMIT {
@@ -234,13 +242,14 @@ async fn parse_opus_vorbis<'a>(
         comment_len = u32::from_le_bytes(comment_len_bytes);
     }
 
-    Ok(VorbisComment::init(comments, outcasts))
+    Ok((VorbisComment::init(comments, outcasts), padding))
 }
 
 pub async fn parse_ogg_pages(
     reader: &mut UringBufReader,
     vorbis_comments: &mut Vec<VorbisComment>,
     pictures_metadata: &mut Vec<Picture>,
+    paddings: &mut Vec<Padding>,
 ) -> anyhow::Result<String> {
     reader.cursor -= 4;
     let mut ogg_reader = OggPageReader::new(reader).await?;
@@ -250,7 +259,11 @@ pub async fn parse_ogg_pages(
     if first_page[0..8] == OPUS_MARKER {
         ogg_reader.parse_header().await?;
         if ogg_reader.get_bytes(8).await? == OPUS_TAGS_MARKER {
-            vorbis_comments.push(parse_opus_vorbis(&mut ogg_reader).await?);
+            let (comment, padding) = parse_opus_vorbis(&mut ogg_reader).await?;
+            if let Some(padding) = padding {
+                paddings.push(padding);
+            }
+            vorbis_comments.push(comment);
         }
         Ok("opus".to_owned())
     } else {

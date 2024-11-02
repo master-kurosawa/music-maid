@@ -27,6 +27,7 @@ pub const VORBIS_FIELDS_LOWER: [&str; 15] = [
 
 #[derive(Debug, Clone, FromRow)]
 pub struct VorbisComment {
+    pub file_id: Option<i64>,
     pub vendor: String,
     pub title: String,
     pub version: String,
@@ -53,6 +54,7 @@ impl VorbisComment {
         let get_value = |key: &str| map.get(key).unwrap_or(&String::new()).clone();
 
         VorbisComment {
+            file_id: None,
             vendor: get_value("vendor"),
             title: get_value("title"),
             version: get_value("version"),
