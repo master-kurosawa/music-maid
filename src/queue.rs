@@ -54,6 +54,9 @@ impl TaskQueue {
             for picture in item.pictures {
                 picture.insert(file_id, &mut *transaction).await.unwrap();
             }
+            for padding in item.paddings {
+                padding.insert(file_id, &mut *transaction).await.unwrap();
+            }
         }
         transaction.commit().await.unwrap();
     }
