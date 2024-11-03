@@ -27,16 +27,17 @@ impl PADDING_MARKER {
 
 pub async fn parse_flac(
     reader: &mut UringBufReader,
-    vorbis_comments: &mut Vec<VorbisComment>,
-    pictures_metadata: &mut Vec<Picture>,
-    paddings: &mut Vec<Padding>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<(Vec<(Vec<VorbisComment>, i64)>, Vec<Picture>, Vec<Padding>)> {
+    let mut vorbis_sections = Vec::new();
+    let mut pictures = Vec::new();
+    let mut paddings = Vec::new();
     loop {
         let header = reader.get_bytes(4).await?;
         let block_length = u32::from_be_bytes([0, header[1], header[2], header[3]]) as usize;
 
         match header[0] {
             VORBIS_COMMENT_MARKER::MARKER => {
+                let vorbis_ptr = (reader.file_ptr + reader.cursor) as i64;
                 let vorbis_block = reader.get_bytes(block_length).await?;
                 if vorbis_block.len() < block_length {
                     return Err(anyhow!(
@@ -44,9 +45,13 @@ pub async fn parse_flac(
                     ));
                 }
 
-                vorbis_comments.push(VorbisComment::parse_block(vorbis_block).await?);
+                vorbis_sections.push((
+                    VorbisComment::parse_block(vorbis_block, vorbis_ptr).await?,
+                    vorbis_ptr,
+                ));
             }
             VORBIS_COMMENT_MARKER::END_OF_BLOCK => {
+                let vorbis_ptr = (reader.file_ptr + reader.cursor) as i64;
                 let vorbis_block = reader.get_bytes(block_length).await?;
 
                 if vorbis_block.len() < block_length {
@@ -55,14 +60,17 @@ pub async fn parse_flac(
                     ));
                 }
 
-                vorbis_comments.push(VorbisComment::parse_block(vorbis_block).await?);
+                vorbis_sections.push((
+                    VorbisComment::parse_block(vorbis_block, vorbis_ptr).await?,
+                    vorbis_ptr,
+                ));
                 break;
             }
             PICTURE_MARKER::MARKER => {
-                pictures_metadata.push(parse_picture(reader).await?);
+                pictures.push(parse_picture(reader).await?);
             }
             PICTURE_MARKER::END_OF_BLOCK => {
-                pictures_metadata.push(parse_picture(reader).await?);
+                pictures.push(parse_picture(reader).await?);
                 break;
             }
             PADDING_MARKER::MARKER => {
@@ -94,7 +102,7 @@ pub async fn parse_flac(
             }
         }
     }
-    Ok(())
+    Ok((vorbis_sections, pictures, paddings))
 }
 async fn parse_picture(reader: &mut UringBufReader) -> anyhow::Result<Picture> {
     let file_ptr = (reader.cursor + reader.file_ptr) as i64;

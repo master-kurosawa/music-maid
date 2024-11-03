@@ -1,5 +1,5 @@
 use base64::{engine::general_purpose, Engine as _};
-use std::{cmp::Ordering, collections::HashMap};
+use std::cmp::Ordering;
 
 use anyhow::anyhow;
 
@@ -8,7 +8,7 @@ use crate::{
     db::{
         padding::Padding,
         picture::Picture,
-        vorbis::{VorbisComment, SMALLEST_VORBIS_4BYTE_POSSIBLE, VORBIS_FIELDS_LOWER},
+        vorbis::{VorbisComment, VorbisMeta, SMALLEST_VORBIS_4BYTE_POSSIBLE, VORBIS_FIELDS_LOWER},
     },
     reader::UringBufReader,
 };
@@ -165,18 +165,22 @@ impl<'a> OggPageReader<'a> {
 async fn parse_opus_vorbis<'a>(
     ogg_reader: &mut OggPageReader<'a>,
     pictures_metadata: &mut Vec<Picture>,
-) -> anyhow::Result<(VorbisComment, Option<Padding>)> {
-    let mut comments = HashMap::new();
-    let mut outcasts = Vec::new();
+) -> anyhow::Result<(Vec<VorbisComment>, Option<Padding>)> {
+    let mut comments = Vec::new();
     let mut padding: Option<Padding> = None;
 
+    let vendor_file_ptr = ogg_reader.reader.file_ptr + ogg_reader.reader.cursor;
     let vendor_bytes: [u8; 4] = ogg_reader.get_bytes(4).await?.try_into().unwrap();
     let vendor_len = u32::from_le_bytes(vendor_bytes);
     let vendor = ogg_reader.get_bytes(vendor_len as usize).await?;
-    comments.insert(
-        "vendor".to_owned(),
-        String::from_utf8_lossy(&vendor).to_string(),
-    );
+    comments.push(VorbisComment {
+        meta_id: None,
+        file_ptr: vendor_file_ptr as i64,
+        value: Some(String::from_utf8_lossy(&vendor).to_string()),
+        size: vendor_len as i64,
+        key: "vendor".to_owned(),
+        id: None,
+    });
 
     let comment_amount_bytes: [u8; 4] = ogg_reader.get_bytes(4).await?.try_into().unwrap();
     let comment_len_bytes: [u8; 4] = ogg_reader.get_bytes(4).await?.try_into().unwrap();
@@ -213,12 +217,27 @@ async fn parse_opus_vorbis<'a>(
             break;
         }
         if comment_len > VORBIS_SIZE_LIMIT {
-            let pic_marker_len = VORBIS_PICTURE_MARKER.len();
-            let pic_marker = ogg_reader.get_bytes(pic_marker_len).await?;
+            let mut comment_key = Vec::with_capacity(VORBIS_PICTURE_MARKER.len());
+            // glowing
+            loop {
+                let k = ogg_reader.get_bytes(1).await?[0];
+                if k == b'=' {
+                    break;
+                }
+                comment_key.push(k);
+            }
 
-            ogg_reader.skip(1).await?;
-            let skipped = if pic_marker == VORBIS_PICTURE_MARKER
-                || pic_marker == VORBIS_PICTURE_MARKER_UPPER
+            comments.push(VorbisComment {
+                id: None,
+                meta_id: None,
+                key: String::from_utf8_lossy(&comment_key).to_string(),
+                size: comment_len as i64 + 4,
+                value: None,
+                file_ptr: comment_ptr as i64 - 4,
+            });
+
+            let skipped = if comment_key == VORBIS_PICTURE_MARKER
+                || comment_key == VORBIS_PICTURE_MARKER_UPPER
             {
                 let (skipped, picture) = parse_picture_meta(ogg_reader, comment_ptr as i64).await?;
                 pictures_metadata.push(picture);
@@ -231,7 +250,7 @@ async fn parse_opus_vorbis<'a>(
                 break;
             }
             ogg_reader
-                .skip(comment_len as usize - pic_marker_len - skipped as usize - 1)
+                .skip(comment_len as usize - comment_key.len() - skipped as usize - 1)
                 .await?;
         } else {
             let comment = ogg_reader.get_bytes(comment_len as usize).await?;
@@ -246,11 +265,14 @@ async fn parse_opus_vorbis<'a>(
                 }
             }
             if let Some((key, val)) = VorbisComment::into_key_val(&comment) {
-                if VORBIS_FIELDS_LOWER.contains(&key.as_str()) {
-                    comments.insert(key, val);
-                } else {
-                    outcasts.push(format!("{key}={val}"));
-                }
+                comments.push(VorbisComment {
+                    meta_id: None,
+                    id: None,
+                    key,
+                    size: comment_len as i64 + 4,
+                    file_ptr: comment_ptr as i64,
+                    value: Some(val),
+                });
             } else {
                 println!("corrupted comment {:?}", String::from_utf8_lossy(&comment));
                 //return Err(anyhow!("Corrupted comment: {comment}"));
@@ -271,7 +293,7 @@ async fn parse_opus_vorbis<'a>(
         comment_len = u32::from_le_bytes(comment_len_bytes);
     }
 
-    Ok((VorbisComment::init(comments, outcasts), padding))
+    Ok((comments, padding))
 }
 
 async fn parse_picture_meta<'a>(
@@ -330,11 +352,16 @@ async fn parse_picture_meta<'a>(
 
 pub async fn parse_ogg_pages(
     reader: &mut UringBufReader,
-    vorbis_comments: &mut Vec<VorbisComment>,
-    pictures_metadata: &mut Vec<Picture>,
-    paddings: &mut Vec<Padding>,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<(
+    Option<String>,
+    Vec<(Vec<VorbisComment>, i64)>,
+    Vec<Picture>,
+    Vec<Padding>,
+)> {
     reader.cursor -= 4;
+    let mut paddings = Vec::new();
+    let mut vorbis_comments = Vec::new();
+    let mut pictures = Vec::new();
     let mut ogg_reader = OggPageReader::new(reader).await?;
 
     let first_page = ogg_reader.parse_till_end().await?;
@@ -342,15 +369,17 @@ pub async fn parse_ogg_pages(
     if first_page[0..8] == OPUS_MARKER {
         ogg_reader.parse_header().await?;
         if ogg_reader.get_bytes(8).await? == OPUS_TAGS_MARKER {
-            let (comment, padding) = parse_opus_vorbis(&mut ogg_reader, pictures_metadata).await?;
+            let vorbis_ptr = ogg_reader.reader.cursor + ogg_reader.reader.file_ptr;
+            let (comment, padding) = parse_opus_vorbis(&mut ogg_reader, &mut pictures).await?;
             if let Some(padding) = padding {
                 paddings.push(padding);
             }
-            vorbis_comments.push(comment);
+            vorbis_comments.push((comment, vorbis_ptr as i64));
         }
-        Ok("opus".to_owned())
+
+        Ok((Some("opus".to_owned()), vorbis_comments, pictures, paddings))
     } else {
         // TODO
-        Ok("ogg".to_owned())
+        Ok((Some("ogg".to_owned()), vorbis_comments, pictures, paddings))
     }
 }

@@ -1,11 +1,15 @@
 use sqlx::{prelude::FromRow, Executor, Sqlite};
 
-use super::{padding::Padding, picture::Picture, vorbis::VorbisComment};
+use super::{
+    padding::Padding,
+    picture::Picture,
+    vorbis::{VorbisComment, VorbisMeta},
+};
 
 #[derive(Debug, Clone)]
 pub struct AudioFileMeta {
     pub audio_file: AudioFile,
-    pub comments: Vec<VorbisComment>,
+    pub comments: Vec<(Vec<VorbisComment>, i64)>,
     pub pictures: Vec<Picture>,
     pub paddings: Vec<Padding>,
 }
@@ -33,7 +37,13 @@ impl AudioFile {
         E: Executor<'a, Database = Sqlite> + std::marker::Copy,
     {
         let id = self.id.unwrap();
-        let comments = VorbisComment::from_file_id(id, pool).await?;
+        let metas = VorbisMeta::from_file_id(id, pool).await?;
+        let mut comments = Vec::with_capacity(metas.len());
+        for meta in metas {
+            let meta_id = meta.id.unwrap();
+            let vorbis_comments = VorbisComment::from_meta_id(meta_id, pool).await?;
+            comments.push((vorbis_comments, meta.file_ptr));
+        }
         let pictures = Picture::from_file_id(id, pool).await?;
         let paddings = Padding::from_file_id(id, pool).await?;
 

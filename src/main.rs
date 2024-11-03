@@ -30,7 +30,7 @@ async fn read_with_uring(
 ) -> anyhow::Result<()> {
     let file = File::open(path).await?;
 
-    let mut vorbis_comments: Vec<VorbisComment> = Vec::new();
+    let mut vorbis_comments: Vec<(Vec<VorbisComment>, i64)> = Vec::new();
     let mut pictures_metadata: Vec<Picture> = Vec::new();
     let mut paddings: Vec<Padding> = Vec::new();
 
@@ -54,13 +54,7 @@ async fn read_with_uring(
                 ));
             }
             format = Some("flac".to_owned());
-            parse_flac(
-                &mut reader,
-                &mut vorbis_comments,
-                &mut pictures_metadata,
-                &mut paddings,
-            )
-            .await?;
+            (vorbis_comments, pictures_metadata, paddings) = parse_flac(&mut reader).await?;
         }
         OGG_MARKER => {
             if bytes_read < 42 {
@@ -69,15 +63,8 @@ async fn read_with_uring(
                     bytes_read
                 ));
             }
-            format = Some(
-                parse_ogg_pages(
-                    &mut reader,
-                    &mut vorbis_comments,
-                    &mut pictures_metadata,
-                    &mut paddings,
-                )
-                .await?,
-            );
+            (format, vorbis_comments, pictures_metadata, paddings) =
+                parse_ogg_pages(&mut reader).await?;
         }
         _ => {}
     }
