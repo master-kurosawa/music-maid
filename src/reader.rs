@@ -1,12 +1,27 @@
 use std::{
     io::{self, ErrorKind},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Arc,
 };
 
+use anyhow::{anyhow, Context};
 use ignore::{WalkBuilder, WalkState};
 use std::sync::Mutex;
 use tokio_uring::fs::File;
+
+use crate::{
+    db::{
+        audio_file::{AudioFile, AudioFileMeta},
+        padding::Padding,
+        picture::Picture,
+        vorbis::{VorbisComment, FLAC_MARKER},
+    },
+    formats::{
+        flac::parse_flac,
+        opus_ogg::{parse_ogg_pages, OGG_MARKER},
+    },
+    queue::TaskQueue,
+};
 const BASE_SIZE: usize = 8196;
 
 pub struct UringBufReader {
@@ -145,4 +160,88 @@ pub fn walk_dir(path: &str) -> Vec<PathBuf> {
         .into_iter()
         .map(|path| Arc::try_unwrap(path).unwrap().to_owned())
         .collect::<Vec<PathBuf>>()
+}
+
+/// CALL WITH uring RUNTIME
+pub async fn load_data_from_paths(paths: Vec<PathBuf>) {
+    let mut tasks = Vec::new();
+    let queue = Arc::new(tokio::sync::Mutex::new(TaskQueue::new()));
+    for path in paths {
+        let queue = Arc::clone(&queue);
+        let spawn = tokio_uring::spawn(async move { read_with_uring(path, queue).await.unwrap() });
+        tasks.push(spawn);
+    }
+    for task in tasks {
+        let t = task.await;
+        if let Err(t) = t {
+            println!("{t:?}");
+        }
+    }
+    let q = Arc::try_unwrap(queue).unwrap().into_inner();
+    TaskQueue::finish(q).await;
+}
+
+async fn read_with_uring(
+    path: PathBuf,
+    queue: Arc<tokio::sync::Mutex<TaskQueue>>,
+) -> anyhow::Result<()> {
+    let file = File::open(&path).await?;
+
+    let mut vorbis_comments: Vec<(Vec<VorbisComment>, i64)> = Vec::new();
+    let mut pictures_metadata: Vec<Picture> = Vec::new();
+    let mut paddings: Vec<Padding> = Vec::new();
+
+    let mut format: Option<String> = None;
+
+    let mut reader = UringBufReader::new(file, path.to_string_lossy().to_string());
+    let bytes_read = reader.read_next(8196).await?;
+
+    let marker: [u8; 4] = reader
+        .get_bytes(4)
+        .await?
+        .try_into()
+        .with_context(|| anyhow!("Empty file"))?;
+
+    match marker {
+        FLAC_MARKER => {
+            if bytes_read < 42 {
+                return Err(anyhow!(
+                    "Not enough bytes for proper flac STREAMINFO, got {}",
+                    bytes_read
+                ));
+            }
+            format = Some("flac".to_owned());
+            (vorbis_comments, pictures_metadata, paddings) = parse_flac(&mut reader).await?;
+        }
+        OGG_MARKER => {
+            if bytes_read < 42 {
+                return Err(anyhow!(
+                    "Not enough bytes for proper flac STREAMINFO, got {}",
+                    bytes_read
+                ));
+            }
+            (format, vorbis_comments, pictures_metadata, paddings) =
+                parse_ogg_pages(&mut reader).await?;
+        }
+        _ => {}
+    }
+
+    let audio_file = AudioFile {
+        id: None,
+        path: path.to_string_lossy().to_string(),
+        name: path.file_name().unwrap().to_string_lossy().to_string(),
+        format,
+    };
+    queue
+        .lock()
+        .await
+        .push(AudioFileMeta {
+            audio_file,
+            comments: vorbis_comments,
+            pictures: pictures_metadata,
+            paddings,
+        })
+        .await;
+
+    Ok(())
 }
