@@ -13,6 +13,7 @@ pub struct Picture {
     pub color_depth: i64,
     pub indexed_color_number: i64,
     pub size: i64,
+    pub vorbis_comment: bool,
 }
 
 impl Picture {
@@ -29,7 +30,7 @@ impl Picture {
         .await
     }
 
-    pub fn from_picture_block(picture: &[u8], file_ptr: i64) -> Self {
+    pub fn from_picture_block(picture: &[u8], file_ptr: i64, is_vorbis: bool) -> Self {
         let mut cursor = 0;
         let get_u32 =
             |bytes: &[u8]| -> i64 { u32::from_be_bytes(bytes.try_into().unwrap()) as i64 };
@@ -71,6 +72,7 @@ impl Picture {
             height,
             color_depth,
             indexed_color_number,
+            vorbis_comment: is_vorbis,
         }
     }
 
@@ -89,8 +91,9 @@ impl Picture {
                 height,
                 color_depth,
                 indexed_color_number,
-                size)
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+                size,
+                vorbis_comment)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
             file_id,
             self.file_ptr,
             self.picture_type,
@@ -100,7 +103,8 @@ impl Picture {
             self.height,
             self.color_depth,
             self.indexed_color_number,
-            self.size
+            self.size,
+            self.vorbis_comment
         )
         .execute(pool)
         .await?

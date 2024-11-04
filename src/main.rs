@@ -14,7 +14,7 @@ use formats::opus_ogg::parse_ogg_pages;
 use formats::{flac::parse_flac, opus_ogg::OGG_MARKER};
 use ignore::{WalkBuilder, WalkState};
 use queue::TaskQueue;
-use reader::UringBufReader;
+use reader::{walk_dir, UringBufReader};
 use sqlx::SqlitePool;
 use std::{
     env,
@@ -25,10 +25,10 @@ use std::{
 use tokio_uring::fs::File;
 
 async fn read_with_uring(
-    path: &Path,
+    path: PathBuf,
     queue: Arc<tokio::sync::Mutex<TaskQueue>>,
 ) -> anyhow::Result<()> {
-    let file = File::open(path).await?;
+    let file = File::open(&path).await?;
 
     let mut vorbis_comments: Vec<(Vec<VorbisComment>, i64)> = Vec::new();
     let mut pictures_metadata: Vec<Picture> = Vec::new();
@@ -103,35 +103,15 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         return Ok(());
     }
 
-    let paths: Arc<Mutex<Vec<Arc<PathBuf>>>> = Arc::new(Mutex::new(Vec::new()));
+    let paths = walk_dir("./tmp");
     let mut tasks = Vec::new();
-    let builder = WalkBuilder::new("./tmp");
-    builder.build_parallel().run(|| {
-        Box::new(|path| {
-            match path {
-                Ok(entry) => {
-                    if entry.file_type().unwrap().is_dir() {
-                        return WalkState::Continue;
-                    }
-                    let path = Arc::new(entry.path().to_path_buf());
-                    let paths = Arc::clone(&paths);
-                    paths.lock().unwrap().push(path);
-                }
-                Err(_) => panic!(),
-            }
-            WalkState::Continue
-        })
-    });
     tokio_uring::start(async {
         let queue = Arc::new(tokio::sync::Mutex::new(TaskQueue::new()));
-        for entry in paths.lock().into_iter() {
-            entry.clone().into_iter().for_each(|path| {
-                let queue = Arc::clone(&queue);
-                let spawn =
-                    tokio_uring::spawn(async move { read_with_uring(&path, queue).await.unwrap() });
-
-                tasks.push(spawn);
-            });
+        for path in paths {
+            let queue = Arc::clone(&queue);
+            let spawn =
+                tokio_uring::spawn(async move { read_with_uring(path, queue).await.unwrap() });
+            tasks.push(spawn);
         }
         for task in tasks {
             let t = task.await;

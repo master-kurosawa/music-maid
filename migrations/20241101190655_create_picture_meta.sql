@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS picture_metadata(
         color_depth INTEGER NOT NULL,
         indexed_color_number INTEGER NOT NULL,
         size INTEGER NOT NULL,
+        vorbis_comment BOOLEAN NOT NULL,
         FOREIGN KEY (file_id) REFERENCES files(id)
 );
 

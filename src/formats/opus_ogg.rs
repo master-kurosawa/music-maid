@@ -233,7 +233,7 @@ async fn parse_opus_vorbis<'a>(
                 key: String::from_utf8_lossy(&comment_key).to_string(),
                 size: comment_len as i64 + 4,
                 value: None,
-                file_ptr: comment_ptr as i64 - 4,
+                file_ptr: comment_ptr as i64,
             });
 
             let skipped = if comment_key == VORBIS_PICTURE_MARKER
@@ -261,6 +261,7 @@ async fn parse_opus_vorbis<'a>(
                     pictures_metadata.push(Picture::from_picture_block(
                         &comment[VORBIS_PICTURE_MARKER.len() + 1..],
                         comment_ptr as i64,
+                        true,
                     ));
                 }
             }
@@ -346,7 +347,7 @@ async fn parse_picture_meta<'a>(
 
     Ok((
         size_read as u32,
-        Picture::from_picture_block(&final_bytes, file_ptr),
+        Picture::from_picture_block(&final_bytes, file_ptr, true),
     ))
 }
 

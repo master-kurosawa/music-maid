@@ -136,5 +136,6 @@ async fn parse_picture(reader: &mut UringBufReader) -> anyhow::Result<Picture> {
         height: height as i64,
         color_depth: color_depth as i64,
         indexed_color_number: indexed_color_number as i64,
+        vorbis_comment: false,
     })
 }

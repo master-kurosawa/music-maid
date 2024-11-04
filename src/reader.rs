@@ -1,5 +1,11 @@
-use std::io::{self, ErrorKind};
+use std::{
+    io::{self, ErrorKind},
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
+use ignore::{WalkBuilder, WalkState};
+use std::sync::Mutex;
 use tokio_uring::fs::File;
 const BASE_SIZE: usize = 8196;
 
@@ -112,4 +118,31 @@ impl UringBufReader {
         }
         Ok(u32::from_be_bytes(bytes.try_into().unwrap()))
     }
+}
+pub fn walk_dir(path: &str) -> Vec<PathBuf> {
+    let paths: Arc<Mutex<Vec<Arc<PathBuf>>>> = Arc::new(Mutex::new(Vec::new()));
+    let builder = WalkBuilder::new(path);
+    builder.build_parallel().run(|| {
+        Box::new(|path| {
+            match path {
+                Ok(entry) => {
+                    if entry.file_type().unwrap().is_dir() {
+                        return WalkState::Continue;
+                    }
+                    let path = Arc::new(entry.path().to_path_buf());
+                    let paths = Arc::clone(&paths);
+                    paths.lock().unwrap().push(path);
+                }
+                Err(_) => panic!(),
+            }
+            WalkState::Continue
+        })
+    });
+    Arc::try_unwrap(paths)
+        .unwrap()
+        .into_inner()
+        .unwrap()
+        .into_iter()
+        .map(|path| Arc::try_unwrap(path).unwrap().to_owned())
+        .collect::<Vec<PathBuf>>()
 }
