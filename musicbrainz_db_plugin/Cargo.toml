@@ -1,0 +1,21 @@
+[package]
+name = "musicbrainz_db_plugin"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+prost = "0.13.3"
+sqlx = { version = "0.8.2", features = [ "runtime-tokio", "macros", "derive", "postgres", "time", "uuid"]}
+tonic = "0.12.3"
+tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
+
+[build-dependencies]
+tonic-build = "0.12.3"
+
+[[bin]]
+name = "server"
+path = "src/server.rs"
+
+[lib]
+name = "musicbrainz_db_client"
+path = "src/lib.rs"

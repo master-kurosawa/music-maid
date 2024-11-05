@@ -1,0 +1,14 @@
+syntax = "proto3";
+package search;
+
+service Search {
+  rpc SearchRelease (SearchReleaseRequest) returns (SearchReleaseResponse);
+}
+
+message SearchReleaseRequest {
+  string name = 1;
+}
+
+message SearchReleaseResponse {
+  uint64 result_count = 1;
+}
