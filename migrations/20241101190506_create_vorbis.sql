@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS vorbis_comments (
     meta_id INTEGER NOT NULL,
     key TEXT NOT NULL,
     file_ptr INTEGER NOT NULL,
+    last_ogg_header_ptr INTEGER,
     size INTEGER NOT NULL,
     value TEXT,
     FOREIGN KEY (meta_id) REFERENCES vorbis_meta(id)

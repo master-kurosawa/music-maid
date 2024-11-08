@@ -1,6 +1,6 @@
 use crate::{
     db::{padding::Padding, picture::Picture, vorbis::VorbisComment},
-    reader::UringBufReader,
+    io::reader::UringBufReader,
 };
 use anyhow::anyhow;
 

@@ -36,6 +36,7 @@ pub struct VorbisComment {
     pub meta_id: Option<i64>,
     pub key: String,
     pub file_ptr: i64,
+    pub last_ogg_header_ptr: Option<i64>,
     pub size: i64,
     pub value: Option<String>,
 }
@@ -66,6 +67,7 @@ impl VorbisComment {
                 key,
                 value,
                 file_ptr,
+                last_ogg_header_ptr,
                 size) VALUES"
             .to_owned();
 
@@ -73,7 +75,7 @@ impl VorbisComment {
             if i > 0 {
                 query.push(',');
             }
-            query.push_str("(?, ?, ?, ?, ?)");
+            query.push_str("(?, ?, ?, ?, ?, ?)");
         }
         query.push(';');
 
@@ -84,6 +86,7 @@ impl VorbisComment {
                 .bind(c.key)
                 .bind(c.value)
                 .bind(c.file_ptr)
+                .bind(c.last_ogg_header_ptr)
                 .bind(c.size);
         }
         query.execute(pool).await?;
@@ -109,6 +112,7 @@ impl VorbisComment {
             meta_id: None,
             file_ptr: block_ptr,
             size: vendor_len as i64 + 4,
+            last_ogg_header_ptr: None,
             value: Some(String::from_utf8_lossy(&vorbis_block[4..vendor_len + 4]).to_string()),
             id: None,
         });
@@ -121,10 +125,6 @@ impl VorbisComment {
                 as usize;
 
         comment_cursor += 8;
-        if comment_len >= SMALLEST_VORBIS_4BYTE_POSSIBLE as usize {
-            comment_len = comment_amount;
-            comment_cursor -= 4;
-        }
         while comment_cursor + comment_len <= block_length {
             if let Some((key, val)) =
                 Self::into_key_val(&vorbis_block[comment_cursor..comment_cursor + comment_len])
@@ -134,6 +134,7 @@ impl VorbisComment {
                     meta_id: None,
                     value: Some(val),
                     size: comment_len as i64 + 4,
+                    last_ogg_header_ptr: None,
                     key,
                     file_ptr: block_ptr as i64 + comment_cursor as i64 - 4,
                 })
@@ -158,6 +159,7 @@ impl VorbisComment {
                     as usize;
         }
 
+        assert_eq!(comments.len(), comment_amount);
         Ok(comments)
     }
 }

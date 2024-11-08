@@ -34,6 +34,20 @@ pub struct UringBufReader {
 }
 
 impl UringBufReader {
+    /// writes buf at the current offset + cursor then increments cursor.
+    pub async fn write_at_current_offset(&mut self, buf: Vec<u8>) -> anyhow::Result<()> {
+        //self.cursor = 0;
+        //self.file_ptr = offset;
+        let (res, buf) = self
+            .file
+            .write_all_at(buf, self.file_ptr + self.cursor)
+            .await;
+        self.skip(buf.len() as u64).await?;
+        Ok(res?)
+    }
+}
+
+impl UringBufReader {
     pub fn new(file: File, path: String) -> Self {
         UringBufReader {
             buf: Vec::new(),
