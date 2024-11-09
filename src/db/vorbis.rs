@@ -159,7 +159,7 @@ impl VorbisComment {
                     as usize;
         }
 
-        assert_eq!(comments.len(), comment_amount);
+        assert_eq!(comments.len(), comment_amount + 1); // +1 for vendor
         Ok(comments)
     }
 }

@@ -30,7 +30,7 @@ pub struct UringBufReader {
     pub cursor: u64,
     pub file_ptr: u64,
     pub end_of_file: bool,
-    file: File,
+    pub file: File,
 }
 
 impl UringBufReader {

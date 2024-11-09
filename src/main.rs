@@ -14,7 +14,7 @@ use tokio_uring::fs::{File, OpenOptions};
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     sysinfo::set_open_files_limit(10000);
     if env::args().last().unwrap() == "write" {
-        let crazy_path = "./lol/output.opus".to_owned();
+        let crazy_path = "./x/l.opus".to_owned();
 
         tokio_uring::start(async {
             let pool = SqlitePool::connect("sqlite://dev.db").await.unwrap();
@@ -44,6 +44,8 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             for (ptr, size, last_ogg) in pics {
                 reader.file_ptr = last_ogg as u64;
                 let mut r = OggPageReader::new(&mut reader).await.unwrap();
+                let l = r.segment_size;
+                println!("{l}");
                 let s = ptr as u64 - (r.reader.file_ptr + r.reader.cursor);
                 r.skip(s as usize).await.unwrap();
                 let z = String::from_utf8_lossy(
@@ -55,16 +57,18 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                 //   .await
                 //   .unwrap();
                 let left = r.segment_size - r.cursor;
-                r.write_stream(&(3 as u32).to_le_bytes()).await.unwrap();
-                r.write_stream(&[b'x', b'=', b'z']).await.unwrap();
-                r.pad_till_end().await.unwrap();
+                println!("{z:?}");
+                //r.write_stream(&(3 as u32).to_le_bytes()).await.unwrap();
+                //r.write_stream(&[b'x', b'=', b'z']).await.unwrap();
+                //r.write_stream(&vec![0; size as usize - 3]).await.unwrap();
+                r.recalculate_last_crc().await;
             }
             //println!("{file:?}");
         });
         return Ok(());
     }
 
-    let paths = walk_dir("./lol");
+    let paths = walk_dir("./x");
     tokio_uring::builder()
         .entries(1024)
         .start(async { load_data_from_paths(paths).await });
