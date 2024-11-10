@@ -64,7 +64,6 @@ async fn parse_opus_vorbis<'a>(
 
     loop {
         let comment_ptr = ogg_reader.reader.file_ptr + ogg_reader.reader.cursor - 4;
-        println!("{comment_len:?}");
         comment_counter += 1;
         if comment_len == 0 {
             // padding found

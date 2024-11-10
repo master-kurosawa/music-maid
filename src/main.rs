@@ -42,26 +42,23 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                 .collect::<Vec<(i64, i64, i64)>>();
             let v_start = file.comments[0].1;
             for (ptr, size, last_ogg) in pics {
-                reader.file_ptr = last_ogg as u64;
+                reader.read_at_offset(8196, last_ogg as u64).await.unwrap();
                 let mut r = OggPageReader::new(&mut reader).await.unwrap();
-                let l = r.segment_size;
+                let l = r.last_header_ptr;
                 println!("{l}");
                 let s = ptr as u64 - (r.reader.file_ptr + r.reader.cursor);
                 r.skip(s as usize).await.unwrap();
-                let z = String::from_utf8_lossy(
-                    &r.reader.buf[r.reader.cursor as usize..r.reader.cursor as usize + 128],
-                );
                 //   r.write_stream(&vec![
                 //       0x06, 0x00, 0x00, 0x00, b't', b'e', b's', b't', b'=', b'a',
                 //   ])
                 //   .await
                 //   .unwrap();
                 let left = r.segment_size - r.cursor;
-                println!("{z:?}");
+                //println!("{z:?}");
                 //r.write_stream(&(3 as u32).to_le_bytes()).await.unwrap();
                 //r.write_stream(&[b'x', b'=', b'z']).await.unwrap();
                 //r.write_stream(&vec![0; size as usize - 3]).await.unwrap();
-                r.recalculate_last_crc().await;
+                r.pad_till_end().await;
             }
             //println!("{file:?}");
         });

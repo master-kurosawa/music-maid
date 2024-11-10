@@ -1,11 +1,10 @@
 use std::{cmp::Ordering, io};
 
 use anyhow::anyhow;
-use crc32fast::Hasher;
 
 use crate::formats::opus_ogg::OGG_MARKER;
 
-use super::reader::UringBufReader;
+use super::{checksum::crc32, reader::UringBufReader};
 
 pub struct OggPageReader<'a> {
     pub reader: &'a mut UringBufReader,
@@ -13,7 +12,7 @@ pub struct OggPageReader<'a> {
     pub ends_stream: bool,
     pub segment_size: usize,
     pub last_header_ptr: usize,
-    last_header: usize,
+    last_header: Vec<u8>,
 }
 
 impl<'a> OggPageReader<'a> {
@@ -23,7 +22,7 @@ impl<'a> OggPageReader<'a> {
         let mut ogg_reader = OggPageReader {
             reader,
             last_header_ptr: 0,
-            last_header: 0,
+            last_header: Vec::with_capacity(64),
             segment_size: 0,
             ends_stream: true,
             cursor: 0,
@@ -42,6 +41,10 @@ impl<'a> OggPageReader<'a> {
         }
         self.last_header_ptr = (self.reader.file_ptr + self.reader.cursor) as usize;
         let header_prefix = self.reader.get_bytes(27).await?;
+        self.last_header.clear();
+        self.last_header.extend(&header_prefix[0..22]);
+        self.last_header.extend([0; 4]); // 0s out CRC
+        self.last_header.push(header_prefix[26]);
 
         assert_eq!(
             header_prefix[0..4],
@@ -50,18 +53,11 @@ impl<'a> OggPageReader<'a> {
         );
         let header: usize = header_prefix[5].into();
         let segment_len: usize = header_prefix[26].into();
-        let segment_total = self
-            .reader
-            .get_bytes(segment_len)
-            .await?
-            .iter()
-            .fold(0, |acc, x| {
-                println!("{x}");
-                acc + *x as usize
-            });
+        let segments = self.reader.get_bytes(segment_len).await?;
+        let segment_total = segments.iter().fold(0, |acc, x| acc + *x as usize);
+        self.last_header.extend(segments);
         self.segment_size = segment_total;
         self.ends_stream = header == 4 || segment_total % 255 > 0;
-        self.last_header = header;
         self.cursor = 0;
         Ok(())
     }
@@ -150,30 +146,33 @@ impl<'a> OggPageReader<'a> {
 }
 
 impl<'a> OggPageReader<'a> {
-    async fn write_last_crc(&mut self, crc: u32) -> Result<(), io::Error> {
+    async fn write_last_crc(&mut self, segment_bytes: &[u8]) -> Result<(), io::Error> {
         let (res, _buf) = self
             .reader
             .file
-            .write_all_at(crc.to_be_bytes().to_vec(), self.last_header_ptr as u64 + 22)
+            .write_all_at(
+                crc32(segment_bytes).to_le_bytes().to_vec(),
+                self.last_header_ptr as u64 + 22, // crc offset
+            )
             .await;
         res
     }
-    pub async fn recalculate_last_crc(&mut self) -> anyhow::Result<()> {
-        let buf = Vec::with_capacity(self.segment_size);
-        let l = self.segment_size;
-        println!("{l:?}");
-        let (res, buf) = self
+    /// reads entire page (from last header) including header and recalculates its checksum
+    pub async fn recalculate_last_crc(&mut self) -> Result<(), io::Error> {
+        let buf = Vec::with_capacity(self.segment_size + self.last_header.len());
+        let (res, mut buf) = self
             .reader
             .file
-            .read_exact_at(
-                buf,
-                self.last_header_ptr as u64 + 26 + 6 + self.segment_size as u64 / 255,
-            )
+            .read_exact_at(buf, self.last_header_ptr as u64)
             .await;
-        let z = String::from_utf8_lossy(&buf);
-        println!("{z:?}");
         res?;
-        Ok(self.write_last_crc(crc32fast::hash(&buf)).await?)
+
+        // writes 0's at CRC offset
+        unsafe {
+            let ptr = buf.as_mut_ptr();
+            std::ptr::copy_nonoverlapping([0; 4].as_ptr(), ptr.add(22), 4);
+        }
+        self.write_last_crc(&buf).await
     }
 
     /// Writes buffer into segment part of stream at current cursor
@@ -186,7 +185,9 @@ impl<'a> OggPageReader<'a> {
             if segment != self.segment_size {
                 self.recalculate_last_crc().await?;
             } else {
-                self.write_last_crc(crc32fast::hash(data)).await?;
+                let mut header = self.last_header.clone();
+                header.extend(data);
+                self.write_last_crc(&header).await?;
             }
             self.cursor = self.segment_size;
             Box::pin(self.write_stream(&buf[segment..])).await?
@@ -194,7 +195,9 @@ impl<'a> OggPageReader<'a> {
             self.reader.write_at_current_offset(buf.to_vec()).await?;
             self.cursor += buf.len();
             if buf.len() == self.segment_size {
-                self.write_last_crc(crc32fast::hash(buf)).await?;
+                let mut header = self.last_header.clone();
+                header.extend(buf);
+                self.write_last_crc(&header).await?;
                 self.check_cursor().await?;
             } else if self.cursor == self.segment_size {
                 self.recalculate_last_crc().await?;
@@ -207,6 +210,7 @@ impl<'a> OggPageReader<'a> {
     /// Writes \0 bytes to segments until end of stream, starting from current cursor
     pub async fn pad_till_end(&mut self) -> anyhow::Result<()> {
         while !self.ends_stream {
+            println!("lool");
             let segment_len = self.segment_size - self.cursor;
             self.write_stream(&vec![0; segment_len]).await?;
         }
