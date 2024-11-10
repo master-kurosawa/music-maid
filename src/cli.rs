@@ -16,6 +16,8 @@ pub enum SearchService {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Daemonize musicmaid opening an abstract unix socket for communication
+    Oni,
     /// Search for releases, albums, artists using a query
     Search {
         query: String,

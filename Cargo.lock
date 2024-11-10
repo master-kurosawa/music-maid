@@ -1010,9 +1010,16 @@ name = "music-maid"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "hyper-util",
  "indicatif",
+ "libc",
  "musicbrainz_db_plugin",
+ "prost",
  "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-build",
+ "tower 0.5.1",
 ]
 
 [[package]]

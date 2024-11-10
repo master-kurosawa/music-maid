@@ -7,9 +7,20 @@ members = [
 name = "music-maid"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.84"
 
 [dependencies]
 tokio = { version = "1.41.0", features = ["full"] }
 musicbrainz_db_plugin = { path = "musicbrainz_db_plugin" }
 clap = { version = "4.5.20", features = ["derive"] }
 indicatif = "0.17.3"
+tokio-stream = "0.1.16"
+hyper-util = { version = "0.1.4" }
+prost = "0.13.3"
+tonic = "0.12.3"
+libc = { version = "0.2.137", features = ["extra_traits"] }
+tower = { version = "0.5" }
+
+
+[build-dependencies]
+tonic-build = "0.12.3"

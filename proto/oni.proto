@@ -1,0 +1,10 @@
+syntax = "proto3";
+
+package oni;
+
+service OniControl {
+  rpc Quit (QuitRequest) returns (QuitReply);
+}
+
+message QuitRequest {}
+message QuitReply {}
