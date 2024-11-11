@@ -9,7 +9,7 @@ use super::{
 #[derive(Debug, Clone)]
 pub struct AudioFileMeta {
     pub audio_file: AudioFile,
-    pub comments: Vec<(Vec<VorbisComment>, i64)>,
+    pub comments: Vec<(VorbisMeta, Vec<VorbisComment>)>,
     pub pictures: Vec<Picture>,
     pub paddings: Vec<Padding>,
 }
@@ -42,7 +42,7 @@ impl AudioFile {
         for meta in metas {
             let meta_id = meta.id.unwrap();
             let vorbis_comments = VorbisComment::from_meta_id(meta_id, pool).await?;
-            comments.push((vorbis_comments, meta.file_ptr));
+            comments.push((meta, vorbis_comments));
         }
         let pictures = Picture::from_file_id(id, pool).await?;
         let paddings = Padding::from_file_id(id, pool).await?;

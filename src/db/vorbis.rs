@@ -1,4 +1,6 @@
-use sqlx::{prelude::FromRow, Acquire, Executor, Sqlite};
+use sqlx::{prelude::FromRow, Executor, Sqlite};
+
+use crate::io::ogg::OggPageReader;
 
 pub const FLAC_MARKER: [u8; 4] = [0x66, 0x4C, 0x61, 0x43];
 // Used for checking if 4 byte list length is present in vorbis.
@@ -28,6 +30,8 @@ pub struct VorbisMeta {
     pub id: Option<i64>,
     pub file_id: Option<i64>,
     pub file_ptr: i64,
+    pub comment_amount_ptr: i64,
+    pub vendor: String,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -42,6 +46,35 @@ pub struct VorbisComment {
 }
 
 impl VorbisComment {
+    pub async fn into_bytes_ogg<'a>(
+        self,
+        reader: &mut OggPageReader<'a>,
+    ) -> anyhow::Result<Vec<u8>> {
+        let value = if let Some(val) = self.value {
+            val.into_bytes()
+        } else {
+            reader
+                .reader
+                .read_at_offset(
+                    self.size as usize + 8196,
+                    self.last_ogg_header_ptr.unwrap() as u64,
+                )
+                .await?;
+            reader.cursor = reader.segment_size;
+            reader.parse_header().await?;
+            reader
+                .skip(
+                    (self.file_ptr as u64 - reader.reader.file_ptr - reader.reader.cursor) as usize,
+                )
+                .await?;
+            reader.get_bytes(self.size as usize).await?
+        };
+        let mut comment = Vec::with_capacity(self.size as usize + 4);
+        comment.extend(self.size.to_le_bytes());
+        comment.extend(self.key.into_bytes());
+        comment.extend(value);
+        Ok(comment)
+    }
     pub async fn from_meta_id<'a, E>(meta_id: i64, pool: E) -> Result<Vec<Self>, sqlx::Error>
     where
         E: Executor<'a, Database = Sqlite>,
@@ -54,6 +87,25 @@ impl VorbisComment {
         .fetch_all(pool)
         .await
     }
+    pub async fn from_meta_exclude_desc<'a, E>(
+        meta_id: i64,
+        exclude: Vec<i64>,
+        pool: E,
+    ) -> Result<Vec<Self>, sqlx::Error>
+    where
+        E: Executor<'a, Database = Sqlite>,
+    {
+        let query = format!(
+            "SELECT * FROM vorbis_comments WHERE meta_id = ? AND id NOT IN ({}) ORDER BY size;",
+            "?,".repeat(exclude.len() - 1) + "?"
+        );
+        let mut query = sqlx::query_as::<Sqlite, Self>(&query).bind(meta_id);
+        for id in exclude {
+            query = query.bind(id);
+        }
+        query.fetch_all(pool).await
+    }
+
     pub async fn insert_many<'a, E>(
         meta_id: i64,
         comments: Vec<Self>,
@@ -102,21 +154,17 @@ impl VorbisComment {
         })
     }
 
-    pub async fn parse_block(vorbis_block: &[u8], block_ptr: i64) -> anyhow::Result<Vec<Self>> {
+    pub async fn parse_block(
+        vorbis_block: &[u8],
+        block_ptr: i64,
+    ) -> anyhow::Result<(VorbisMeta, Vec<Self>)> {
         let mut comments = Vec::new();
         let block_length = vorbis_block.len();
 
         let vendor_len = u32::from_le_bytes(vorbis_block[0..4].try_into()?) as usize;
-        comments.push(Self {
-            key: "vendor".to_owned(),
-            meta_id: None,
-            file_ptr: block_ptr,
-            size: vendor_len as i64 + 4,
-            last_ogg_header_ptr: None,
-            value: Some(String::from_utf8_lossy(&vorbis_block[4..vendor_len + 4]).to_string()),
-            id: None,
-        });
+        let vendor = String::from_utf8_lossy(&vorbis_block[4..vendor_len + 4]).to_string();
         let mut comment_cursor = vendor_len + 4;
+        let comment_amount_ptr = comment_cursor as i64 + block_ptr;
         let comment_amount: usize =
             u32::from_le_bytes(vorbis_block[comment_cursor..comment_cursor + 4].try_into()?)
                 as usize;
@@ -160,7 +208,14 @@ impl VorbisComment {
         }
 
         assert_eq!(comments.len(), comment_amount + 1); // +1 for vendor
-        Ok(comments)
+        let vorbis_meta = VorbisMeta {
+            id: None,
+            file_ptr: block_ptr,
+            comment_amount_ptr,
+            file_id: None,
+            vendor,
+        };
+        Ok((vorbis_meta, comments))
     }
 }
 
@@ -179,9 +234,11 @@ impl VorbisMeta {
         E: Executor<'a, Database = Sqlite>,
     {
         let id = sqlx::query!(
-            "INSERT INTO vorbis_meta(file_id, file_ptr) VALUES (?, ?)",
+            "INSERT INTO vorbis_meta(file_id, file_ptr, vendor, comment_amount_ptr) VALUES (?, ?, ?, ?)",
             self.file_id,
-            self.file_ptr
+            self.file_ptr,
+            self.vendor,
+            self.comment_amount_ptr
         )
         .execute(pool)
         .await?

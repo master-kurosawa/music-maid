@@ -2,7 +2,10 @@ pub mod db;
 mod formats;
 mod io;
 pub mod queue;
-use db::{audio_file::AudioFile, vorbis::VorbisComment};
+use db::{
+    audio_file::AudioFile,
+    vorbis::{VorbisComment, VorbisMeta},
+};
 use io::{
     ogg::OggPageReader,
     reader::{load_data_from_paths, walk_dir, UringBufReader},
@@ -30,17 +33,16 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                     .open(&crazy_path)
                     .await
                     .unwrap(),
-                crazy_path.clone(),
+                crazy_path.into(),
             );
 
             let pics = file.comments[0]
-                .0
+                .1
                 .clone()
                 .into_iter()
                 .filter(|v| v.key == "metadata_block_picture")
                 .map(|pv| (pv.file_ptr, pv.size, pv.last_ogg_header_ptr.unwrap()))
                 .collect::<Vec<(i64, i64, i64)>>();
-            let v_start = file.comments[0].1;
             for (ptr, size, last_ogg) in pics {
                 reader.read_at_offset(8196, last_ogg as u64).await.unwrap();
                 let mut r = OggPageReader::new(&mut reader).await.unwrap();
@@ -55,9 +57,9 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                 //   .unwrap();
                 let left = r.segment_size - r.cursor;
                 //println!("{z:?}");
-                //r.write_stream(&(3 as u32).to_le_bytes()).await.unwrap();
-                //r.write_stream(&[b'x', b'=', b'z']).await.unwrap();
-                //r.write_stream(&vec![0; size as usize - 3]).await.unwrap();
+                r.write_stream(&(3 as u32).to_le_bytes()).await.unwrap();
+                r.write_stream(&[b'x', b'=', b'z']).await.unwrap();
+                r.write_stream(&vec![0; size as usize - 3]).await.unwrap();
                 r.pad_till_end().await;
             }
             //println!("{file:?}");

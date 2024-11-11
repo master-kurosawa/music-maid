@@ -4,10 +4,7 @@ use tokio::task::JoinHandle;
 
 use futures::channel::{mpsc, mpsc::Sender};
 
-use crate::db::{
-    audio_file::AudioFileMeta,
-    vorbis::{VorbisComment, VorbisMeta},
-};
+use crate::db::{audio_file::AudioFileMeta, vorbis::VorbisComment};
 
 const QUEUE_LIMIT: usize = 25;
 
@@ -51,16 +48,9 @@ impl TaskQueue {
         let mut transaction = pool.begin().await.unwrap();
         for item in queue {
             let file_id = item.audio_file.insert(&mut *transaction).await.unwrap();
-            for (vorbis, file_ptr) in item.comments {
-                let meta_id = VorbisMeta {
-                    file_id: Some(file_id),
-                    file_ptr,
-                    id: None,
-                }
-                .insert(&mut *transaction)
-                .await
-                .unwrap();
-
+            for (mut vorbis_meta, vorbis) in item.comments {
+                vorbis_meta.file_id = Some(file_id);
+                let meta_id = vorbis_meta.insert(&mut *transaction).await.unwrap();
                 VorbisComment::insert_many(meta_id, vorbis, &mut *transaction)
                     .await
                     .unwrap();

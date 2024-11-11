@@ -1,14 +1,3 @@
-use std::{
-    io::{self, ErrorKind},
-    path::PathBuf,
-    sync::Arc,
-};
-
-use anyhow::{anyhow, Context};
-use ignore::{WalkBuilder, WalkState};
-use std::sync::Mutex;
-use tokio_uring::fs::File;
-
 use crate::{
     db::{
         audio_file::{AudioFile, AudioFileMeta},
@@ -22,11 +11,21 @@ use crate::{
     },
     queue::TaskQueue,
 };
+use anyhow::{anyhow, Context};
+use ignore::{WalkBuilder, WalkState};
+use std::sync::Mutex;
+use std::{
+    io::{self, ErrorKind},
+    path::PathBuf,
+    sync::Arc,
+};
+use tokio_uring::fs::File;
+
 const BASE_SIZE: usize = 8196;
 
 pub struct UringBufReader {
     pub buf: Vec<u8>,
-    pub path: String,
+    pub path: PathBuf,
     pub cursor: u64,
     pub file_ptr: u64,
     pub end_of_file: bool,
@@ -36,8 +35,6 @@ pub struct UringBufReader {
 impl UringBufReader {
     /// writes buf at the current offset + cursor then increments cursor.
     pub async fn write_at_current_offset(&mut self, buf: Vec<u8>) -> anyhow::Result<()> {
-        //self.cursor = 0;
-        //self.file_ptr = offset;
         let (res, buf) = self
             .file
             .write_all_at(buf, self.file_ptr + self.cursor)
@@ -48,7 +45,7 @@ impl UringBufReader {
 }
 
 impl UringBufReader {
-    pub fn new(file: File, path: String) -> Self {
+    pub fn new(file: File, path: PathBuf) -> Self {
         UringBufReader {
             buf: Vec::new(),
             file,
@@ -148,6 +145,7 @@ impl UringBufReader {
         Ok(u32::from_be_bytes(bytes.try_into().unwrap()))
     }
 }
+
 pub fn walk_dir(path: &str) -> Vec<PathBuf> {
     let paths: Arc<Mutex<Vec<Arc<PathBuf>>>> = Arc::new(Mutex::new(Vec::new()));
     let builder = WalkBuilder::new(path);
@@ -200,14 +198,7 @@ async fn read_with_uring(
     queue: Arc<tokio::sync::Mutex<TaskQueue>>,
 ) -> anyhow::Result<()> {
     let file = File::open(&path).await?;
-
-    let mut vorbis_comments: Vec<(Vec<VorbisComment>, i64)> = Vec::new();
-    let mut pictures_metadata: Vec<Picture> = Vec::new();
-    let mut paddings: Vec<Padding> = Vec::new();
-
-    let mut format: Option<String> = None;
-
-    let mut reader = UringBufReader::new(file, path.to_string_lossy().to_string());
+    let mut reader = UringBufReader::new(file, path);
     let bytes_read = reader.read_next(8196).await?;
 
     let marker: [u8; 4] = reader
@@ -216,7 +207,7 @@ async fn read_with_uring(
         .try_into()
         .with_context(|| anyhow!("Empty file"))?;
 
-    match marker {
+    let file_meta = match marker {
         FLAC_MARKER => {
             if bytes_read < 42 {
                 return Err(anyhow!(
@@ -224,8 +215,7 @@ async fn read_with_uring(
                     bytes_read
                 ));
             }
-            format = Some("flac".to_owned());
-            (vorbis_comments, pictures_metadata, paddings) = parse_flac(&mut reader).await?;
+            parse_flac(&mut reader).await?
         }
         OGG_MARKER => {
             if bytes_read < 42 {
@@ -234,28 +224,12 @@ async fn read_with_uring(
                     bytes_read
                 ));
             }
-            (format, vorbis_comments, pictures_metadata, paddings) =
-                parse_ogg_pages(&mut reader).await?;
+            parse_ogg_pages(&mut reader).await?
         }
-        _ => {}
-    }
-
-    let audio_file = AudioFile {
-        id: None,
-        path: path.to_string_lossy().to_string(),
-        name: path.file_name().unwrap().to_string_lossy().to_string(),
-        format,
+        _ => return Ok(()),
     };
-    queue
-        .lock()
-        .await
-        .push(AudioFileMeta {
-            audio_file,
-            comments: vorbis_comments,
-            pictures: pictures_metadata,
-            paddings,
-        })
-        .await;
+
+    queue.lock().await.push(file_meta).await;
 
     Ok(())
 }

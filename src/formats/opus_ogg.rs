@@ -1,11 +1,10 @@
 use base64::{engine::general_purpose, Engine as _};
-use std::cmp::Ordering;
-
-use anyhow::anyhow;
+use tokio_uring::fs::File;
 
 pub const OGG_MARKER: [u8; 4] = [0x4F, 0x67, 0x67, 0x53];
 use crate::{
     db::{
+        audio_file::{AudioFile, AudioFileMeta},
         padding::Padding,
         picture::Picture,
         vorbis::{VorbisComment, VorbisMeta, SMALLEST_VORBIS_4BYTE_POSSIBLE, VORBIS_FIELDS_LOWER},
@@ -29,24 +28,17 @@ const VORBIS_PICTURE_MARKER_UPPER: [u8; 22] = [
 
 async fn parse_opus_vorbis<'a>(
     ogg_reader: &mut OggPageReader<'a>,
-    pictures_metadata: &mut Vec<Picture>,
-) -> anyhow::Result<(Vec<VorbisComment>, Option<Padding>)> {
+) -> anyhow::Result<AudioFileMeta> {
     let mut comments = Vec::new();
-    let mut padding: Option<Padding> = None;
+    let mut pictures = Vec::new();
+    let mut padding = Vec::new();
 
-    let vendor_file_ptr = ogg_reader.reader.file_ptr + ogg_reader.reader.cursor;
+    let vorbis_ptr = (ogg_reader.reader.file_ptr + ogg_reader.reader.cursor) as i64;
     let vendor_bytes: [u8; 4] = ogg_reader.get_bytes(4).await?.try_into().unwrap();
     let vendor_len = u32::from_le_bytes(vendor_bytes);
-    let vendor = ogg_reader.get_bytes(vendor_len as usize).await?;
-    comments.push(VorbisComment {
-        meta_id: None,
-        file_ptr: vendor_file_ptr as i64,
-        value: Some(String::from_utf8_lossy(&vendor).to_string()),
-        size: vendor_len as i64,
-        last_ogg_header_ptr: Some(ogg_reader.last_header_ptr as i64),
-        key: "vendor".to_owned(),
-        id: None,
-    });
+    let vendor =
+        String::from_utf8_lossy(&ogg_reader.get_bytes(vendor_len as usize).await?).to_string();
+    let comment_amount_ptr = (ogg_reader.reader.file_ptr + ogg_reader.reader.cursor) as i64;
 
     let comment_amount_bytes: [u8; 4] = ogg_reader.get_bytes(4).await?.try_into().unwrap();
     let comment_len_bytes: [u8; 4] = ogg_reader.get_bytes(4).await?.try_into().unwrap();
@@ -72,7 +64,7 @@ async fn parse_opus_vorbis<'a>(
             let file_ptr = ogg_reader.reader.file_ptr + ogg_reader.reader.cursor;
             let padding_len = ogg_reader.parse_till_end().await?.len();
             if padding_len > 0 {
-                padding = Some(Padding {
+                padding.push(Padding {
                     id: None,
                     file_id: None,
                     byte_size: Some(padding_len as i64),
@@ -107,7 +99,7 @@ async fn parse_opus_vorbis<'a>(
                 || comment_key == VORBIS_PICTURE_MARKER_UPPER
             {
                 let (skipped, picture) = parse_picture_meta(ogg_reader, comment_ptr as i64).await?;
-                pictures_metadata.push(picture);
+                pictures.push(picture);
                 skipped
             } else {
                 0
@@ -125,7 +117,7 @@ async fn parse_opus_vorbis<'a>(
                 if picture_check == VORBIS_PICTURE_MARKER
                     || picture_check == VORBIS_PICTURE_MARKER_UPPER
                 {
-                    pictures_metadata.push(Picture::from_picture_block(
+                    pictures.push(Picture::from_picture_block(
                         &general_purpose::STANDARD
                             .decode(&comment[VORBIS_PICTURE_MARKER.len() + 1..])
                             .unwrap(),
@@ -163,8 +155,30 @@ async fn parse_opus_vorbis<'a>(
 
         comment_len = u32::from_le_bytes(comment_len_bytes);
     }
-
-    Ok((comments, padding))
+    let meta = VorbisMeta {
+        vendor,
+        comment_amount_ptr,
+        file_ptr: vorbis_ptr,
+        id: None,
+        file_id: None,
+    };
+    Ok(AudioFileMeta {
+        audio_file: AudioFile {
+            id: None,
+            path: ogg_reader.reader.path.to_string_lossy().to_string(),
+            name: ogg_reader
+                .reader
+                .path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
+            format: Some("opus".to_owned()),
+        },
+        pictures,
+        comments: vec![(meta, comments)],
+        paddings: padding,
+    })
 }
 
 async fn parse_picture_meta<'a>(
@@ -221,18 +235,8 @@ async fn parse_picture_meta<'a>(
     ))
 }
 
-pub async fn parse_ogg_pages(
-    reader: &mut UringBufReader,
-) -> anyhow::Result<(
-    Option<String>,
-    Vec<(Vec<VorbisComment>, i64)>,
-    Vec<Picture>,
-    Vec<Padding>,
-)> {
+pub async fn parse_ogg_pages(reader: &mut UringBufReader) -> anyhow::Result<AudioFileMeta> {
     reader.cursor -= 4;
-    let mut paddings = Vec::new();
-    let mut vorbis_comments = Vec::new();
-    let mut pictures = Vec::new();
     let mut ogg_reader = OggPageReader::new(reader).await?;
 
     let first_page = ogg_reader.parse_till_end().await?;
@@ -240,17 +244,61 @@ pub async fn parse_ogg_pages(
     if first_page[0..8] == OPUS_MARKER {
         ogg_reader.parse_header().await?;
         if ogg_reader.get_bytes(8).await? == OPUS_TAGS_MARKER {
-            let vorbis_ptr = ogg_reader.reader.cursor + ogg_reader.reader.file_ptr;
-            let (comment, padding) = parse_opus_vorbis(&mut ogg_reader, &mut pictures).await?;
-            if let Some(padding) = padding {
-                paddings.push(padding);
-            }
-            vorbis_comments.push((comment, vorbis_ptr as i64));
+            return parse_opus_vorbis(&mut ogg_reader).await;
         }
-
-        Ok((Some("opus".to_owned()), vorbis_comments, pictures, paddings))
+        Ok(AudioFileMeta {
+            audio_file: AudioFile {
+                path: ogg_reader.reader.path.to_string_lossy().to_string(),
+                format: Some("opus".to_owned()),
+                name: ogg_reader
+                    .reader
+                    .path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string(),
+                id: None,
+            },
+            paddings: vec![],
+            comments: vec![],
+            pictures: vec![],
+        })
     } else {
         // TODO
-        Ok((Some("ogg".to_owned()), vorbis_comments, pictures, paddings))
+        Ok(AudioFileMeta {
+            audio_file: AudioFile {
+                path: ogg_reader.reader.path.to_string_lossy().to_string(),
+                format: Some("ogg".to_owned()),
+                name: ogg_reader
+                    .reader
+                    .path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string(),
+                id: None,
+            },
+            paddings: vec![],
+            comments: vec![],
+            pictures: vec![],
+        })
     }
+}
+
+pub async fn remove_comments(meta: AudioFileMeta, names: Vec<String>) -> anyhow::Result<()> {
+    let file = File::open(meta.audio_file.path.clone()).await?;
+    let mut reader = UringBufReader::new(file, meta.audio_file.path.into());
+    let mut ogg_reader = OggPageReader::new(&mut reader).await?;
+    let (vorbis_meta, comments) = &meta.comments[0]; // oggs can contain only 1 meta field
+    let mut comment_bytes = Vec::new();
+    let mut removed_comment_size = 0;
+    for comment in comments.iter() {
+        if !names.contains(&comment.key) {
+            removed_comment_size += comment.size + 4;
+        } else {
+            comment_bytes.push(comment.to_owned().into_bytes_ogg(&mut ogg_reader).await?);
+        }
+    }
+
+    Ok(())
 }

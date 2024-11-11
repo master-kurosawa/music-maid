@@ -1,5 +1,10 @@
 use crate::{
-    db::{padding::Padding, picture::Picture, vorbis::VorbisComment},
+    db::{
+        audio_file::{AudioFile, AudioFileMeta},
+        padding::Padding,
+        picture::Picture,
+        vorbis::{VorbisComment, VorbisMeta},
+    },
     io::reader::UringBufReader,
 };
 use anyhow::anyhow;
@@ -25,9 +30,18 @@ impl PADDING_MARKER {
     const MARKER: u8 = 0b00000001;
 }
 
-pub async fn parse_flac(
-    reader: &mut UringBufReader,
-) -> anyhow::Result<(Vec<(Vec<VorbisComment>, i64)>, Vec<Picture>, Vec<Padding>)> {
+pub async fn parse_flac(reader: &mut UringBufReader) -> anyhow::Result<(AudioFileMeta)> {
+    let audio_file = AudioFile {
+        id: None,
+        path: reader.path.to_string_lossy().to_string(),
+        name: reader
+            .path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string(),
+        format: Some("flac".to_owned()),
+    };
     let mut vorbis_sections = Vec::new();
     let mut pictures = Vec::new();
     let mut paddings = Vec::new();
@@ -45,10 +59,7 @@ pub async fn parse_flac(
                     ));
                 }
 
-                vorbis_sections.push((
-                    VorbisComment::parse_block(vorbis_block, vorbis_ptr).await?,
-                    vorbis_ptr,
-                ));
+                vorbis_sections.push(VorbisComment::parse_block(vorbis_block, vorbis_ptr).await?);
             }
             VORBIS_COMMENT_MARKER::END_OF_BLOCK => {
                 let vorbis_ptr = (reader.file_ptr + reader.cursor) as i64;
@@ -60,10 +71,7 @@ pub async fn parse_flac(
                     ));
                 }
 
-                vorbis_sections.push((
-                    VorbisComment::parse_block(vorbis_block, vorbis_ptr).await?,
-                    vorbis_ptr,
-                ));
+                vorbis_sections.push(VorbisComment::parse_block(vorbis_block, vorbis_ptr).await?);
                 break;
             }
             PICTURE_MARKER::MARKER => {
@@ -102,7 +110,12 @@ pub async fn parse_flac(
             }
         }
     }
-    Ok((vorbis_sections, pictures, paddings))
+    Ok(AudioFileMeta {
+        audio_file,
+        comments: vorbis_sections,
+        pictures,
+        paddings,
+    })
 }
 async fn parse_picture(reader: &mut UringBufReader) -> anyhow::Result<Picture> {
     let file_ptr = (reader.cursor + reader.file_ptr) as i64;

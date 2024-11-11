@@ -13,6 +13,8 @@ CREATE TABLE IF NOT EXISTS vorbis_meta (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     file_id INTEGER NOT NULL,
     file_ptr INTEGER NOT NULL,
+    vendor TEXT NOT NULL,
+    comment_amount_ptr INTEGER NOT NULL,
     FOREIGN KEY (file_id) REFERENCES files(id)
 );
 

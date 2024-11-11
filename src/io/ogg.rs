@@ -1,10 +1,7 @@
-use std::{cmp::Ordering, io};
-
-use anyhow::anyhow;
-
-use crate::formats::opus_ogg::OGG_MARKER;
-
 use super::{checksum::crc32, reader::UringBufReader};
+use crate::formats::opus_ogg::OGG_MARKER;
+use anyhow::anyhow;
+use std::{cmp::Ordering, io};
 
 pub struct OggPageReader<'a> {
     pub reader: &'a mut UringBufReader,
@@ -36,7 +33,8 @@ impl<'a> OggPageReader<'a> {
         let path = self.reader.path.clone();
         if self.segment_size != self.cursor {
             return Err(anyhow!(
-                "Attempted to read header while cursor is in the middle of segment. file: {path}"
+                "Attempted to read header while cursor is in the middle of segment. file: {}",
+                path.to_str().unwrap()
             ));
         }
         self.last_header_ptr = (self.reader.file_ptr + self.reader.cursor) as usize;
@@ -49,7 +47,8 @@ impl<'a> OggPageReader<'a> {
         assert_eq!(
             header_prefix[0..4],
             OGG_MARKER,
-            "OGG marker doesn't match. Possibly corrupted file: {path}"
+            "OGG marker doesn't match. Possibly corrupted file: {}",
+            path.to_str().unwrap()
         );
         let header: usize = header_prefix[5].into();
         let segment_len: usize = header_prefix[26].into();
@@ -89,10 +88,12 @@ impl<'a> OggPageReader<'a> {
     /// cursor > segment_size => Err
     /// _ => Ok(())
     async fn check_cursor(&mut self) -> anyhow::Result<()> {
-        let c = &self.reader.path;
         match self.cursor.cmp(&self.segment_size) {
             Ordering::Equal => self.parse_header().await,
-            Ordering::Greater => Err(anyhow!("Attempted to read bytes from header segment {c}")),
+            Ordering::Greater => Err(anyhow!(
+                "Attempted to read bytes from header segment {}",
+                self.reader.path.to_str().unwrap(),
+            )),
             _ => Ok(()),
         }
     }
@@ -176,43 +177,45 @@ impl<'a> OggPageReader<'a> {
     }
 
     /// Writes buffer into segment part of stream at current cursor
+    /// recalculates checksum
     pub async fn write_stream(&mut self, buf: &[u8]) -> anyhow::Result<()> {
         self.check_cursor().await?;
-        let segment = self.segment_size - self.cursor;
-        if buf.len() > segment {
-            let data = &buf[0..segment];
-            self.reader.write_at_current_offset(data.to_vec()).await?;
-            if segment != self.segment_size {
-                self.recalculate_last_crc().await?;
-            } else {
-                let mut header = self.last_header.clone();
-                header.extend(data);
-                self.write_last_crc(&header).await?;
-            }
-            self.cursor = self.segment_size;
-            Box::pin(self.write_stream(&buf[segment..])).await?
+
+        let remaining_in_segment = self.segment_size - self.cursor;
+        let (current_chunk, remaining_data) = if buf.len() > remaining_in_segment {
+            buf.split_at(remaining_in_segment)
         } else {
-            self.reader.write_at_current_offset(buf.to_vec()).await?;
-            self.cursor += buf.len();
-            if buf.len() == self.segment_size {
+            (buf, &[][..])
+        };
+
+        self.reader
+            .write_at_current_offset(current_chunk.to_vec())
+            .await?;
+        self.cursor += current_chunk.len();
+
+        if self.cursor == self.segment_size {
+            if current_chunk.len() == self.segment_size {
                 let mut header = self.last_header.clone();
-                header.extend(buf);
+                header.extend(current_chunk);
                 self.write_last_crc(&header).await?;
-                self.check_cursor().await?;
-            } else if self.cursor == self.segment_size {
+            } else {
                 self.recalculate_last_crc().await?;
-                self.check_cursor().await?;
             }
+            self.check_cursor().await?;
         }
+
+        if !remaining_data.is_empty() {
+            Box::pin(self.write_stream(remaining_data)).await?;
+        }
+
         Ok(())
     }
 
     /// Writes \0 bytes to segments until end of stream, starting from current cursor
     pub async fn pad_till_end(&mut self) -> anyhow::Result<()> {
         while !self.ends_stream {
-            println!("lool");
-            let segment_len = self.segment_size - self.cursor;
-            self.write_stream(&vec![0; segment_len]).await?;
+            let remaining_segment = self.segment_size - self.cursor;
+            self.write_stream(&vec![0; remaining_segment]).await?;
         }
         self.write_stream(&vec![0; self.segment_size - self.cursor])
             .await?;
