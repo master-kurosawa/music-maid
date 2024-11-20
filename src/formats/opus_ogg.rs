@@ -1,5 +1,7 @@
+use std::os::fd::AsRawFd;
+
 use base64::{engine::general_purpose, Engine as _};
-use tokio_uring::fs::File;
+use tokio_uring::fs::{File, OpenOptions};
 
 pub const OGG_MARKER: [u8; 4] = [0x4F, 0x67, 0x67, 0x53];
 use crate::{
@@ -7,7 +9,9 @@ use crate::{
         audio_file::{AudioFile, AudioFileMeta},
         padding::Padding,
         picture::Picture,
-        vorbis::{VorbisComment, VorbisMeta, SMALLEST_VORBIS_4BYTE_POSSIBLE, VORBIS_FIELDS_LOWER},
+        vorbis::{
+            self, VorbisComment, VorbisMeta, SMALLEST_VORBIS_4BYTE_POSSIBLE, VORBIS_FIELDS_LOWER,
+        },
     },
     io::{ogg::OggPageReader, reader::UringBufReader},
 };
@@ -43,37 +47,14 @@ async fn parse_opus_vorbis<'a>(
     let comment_amount_bytes: [u8; 4] = ogg_reader.get_bytes(4).await?.try_into().unwrap();
     let comment_len_bytes: [u8; 4] = ogg_reader.get_bytes(4).await?.try_into().unwrap();
 
-    let mut comment_amount: Option<u32> = Some(u32::from_le_bytes(comment_amount_bytes));
+    let comment_amount = u32::from_le_bytes(comment_amount_bytes);
     let mut comment_len = u32::from_le_bytes(comment_len_bytes);
-
-    if comment_len >= SMALLEST_VORBIS_4BYTE_POSSIBLE {
-        comment_len = comment_amount.unwrap();
-        comment_amount = None;
-        ogg_reader.cursor -= 4;
-    }
-
+    let mut vorbis_end_ptr = 0;
     let mut comment_counter = 0;
 
     loop {
         let comment_ptr = ogg_reader.reader.file_ptr + ogg_reader.reader.cursor - 4;
         comment_counter += 1;
-        if comment_len == 0 {
-            // padding found
-            ogg_reader.reader.cursor -= 4;
-            ogg_reader.cursor -= 4;
-            let file_ptr = ogg_reader.reader.file_ptr + ogg_reader.reader.cursor;
-            let padding_len = ogg_reader.parse_till_end().await?.len();
-            if padding_len > 0 {
-                padding.push(Padding {
-                    id: None,
-                    file_id: None,
-                    byte_size: Some(padding_len as i64),
-                    file_ptr: Some(file_ptr as i64),
-                });
-            }
-
-            break;
-        }
         if comment_len > VORBIS_SIZE_LIMIT {
             let mut comment_key = Vec::with_capacity(VORBIS_PICTURE_MARKER.len());
             // glowing
@@ -104,10 +85,7 @@ async fn parse_opus_vorbis<'a>(
             } else {
                 0
             };
-            // if huge comment is at the end we don't waste time skipping it if its last
-            if comment_amount.is_some() && comment_amount.unwrap() == comment_counter {
-                break;
-            }
+
             ogg_reader
                 .skip(comment_len as usize - comment_key.len() - skipped as usize - 1)
                 .await?;
@@ -142,7 +120,35 @@ async fn parse_opus_vorbis<'a>(
                 // skip the corrupted comments for now
             }
         }
-        if ogg_reader.ends_stream && ogg_reader.segment_size - ogg_reader.cursor == 0 {
+        if comment_counter == comment_amount
+            || (ogg_reader.ends_stream && ogg_reader.segment_size - ogg_reader.cursor == 0)
+        {
+            vorbis_end_ptr = ogg_reader.reader.current_offset();
+            let comment_len_bytes: [u8; 4] =
+                if let Ok(comment_len_bytes) = ogg_reader.get_bytes(4).await?.try_into() {
+                    comment_len_bytes
+                } else {
+                    break;
+                };
+
+            comment_len = u32::from_le_bytes(comment_len_bytes);
+            if comment_len == 0 {
+                // padding found
+                ogg_reader.reader.cursor -= 4;
+                ogg_reader.cursor -= 4;
+                let file_ptr = ogg_reader.reader.current_offset();
+                let padding_len = ogg_reader.parse_till_end().await?.len();
+                vorbis_end_ptr = ogg_reader.reader.current_offset();
+                if padding_len > 0 {
+                    padding.push(Padding {
+                        id: None,
+                        file_id: None,
+                        byte_size: Some(padding_len as i64),
+                        file_ptr: Some(file_ptr as i64),
+                    });
+                }
+            }
+
             break;
         }
 
@@ -159,6 +165,7 @@ async fn parse_opus_vorbis<'a>(
         vendor,
         comment_amount_ptr,
         file_ptr: vorbis_ptr,
+        end_ptr: vorbis_end_ptr as i64,
         id: None,
         file_id: None,
     };
@@ -286,19 +293,90 @@ pub async fn parse_ogg_pages(reader: &mut UringBufReader) -> anyhow::Result<Audi
 }
 
 pub async fn remove_comments(meta: AudioFileMeta, names: Vec<String>) -> anyhow::Result<()> {
-    let file = File::open(meta.audio_file.path.clone()).await?;
+    let file = OpenOptions::new()
+        .write(true)
+        .read(true)
+        .open(meta.audio_file.path.clone())
+        .await
+        .unwrap();
     let mut reader = UringBufReader::new(file, meta.audio_file.path.into());
-    let mut ogg_reader = OggPageReader::new(&mut reader).await?;
+    let mut ogg_reader = OggPageReader::new(&mut reader).await.unwrap();
+    ogg_reader.parse_till_end().await.unwrap();
+    ogg_reader.parse_header().await.unwrap();
     let (vorbis_meta, comments) = &meta.comments[0]; // oggs can contain only 1 meta field
     let mut comment_bytes = Vec::new();
     let mut removed_comment_size = 0;
+    let mut kept_comments: u32 = 0;
     for comment in comments.iter() {
-        if !names.contains(&comment.key) {
-            removed_comment_size += comment.size + 4;
+        if names.contains(&comment.key) {
+            removed_comment_size += comment.size;
         } else {
-            comment_bytes.push(comment.to_owned().into_bytes_ogg(&mut ogg_reader).await?);
+            let comment = comment
+                .to_owned()
+                .into_bytes_ogg(&mut ogg_reader)
+                .await
+                .unwrap();
+            kept_comments += 1;
+            comment_bytes.extend(comment);
         }
     }
+    ogg_reader.reader.end_of_file = false;
+
+    ogg_reader.reader.read_at_offset(8196, 0).await?;
+    ogg_reader.cursor = ogg_reader.segment_size;
+    ogg_reader.parse_header().await?;
+    ogg_reader.parse_till_end().await?;
+    ogg_reader.parse_header().await?;
+    ogg_reader.skip(12 + vorbis_meta.vendor.len()).await?;
+    ogg_reader
+        .write_stream(&kept_comments.to_le_bytes())
+        .await
+        .unwrap();
+    ogg_reader.write_stream(&comment_bytes).await.unwrap();
+    ogg_reader
+        .reader
+        .write_at_current_offset(vec![0; ogg_reader.segment_size - ogg_reader.cursor])
+        .await
+        .unwrap();
+
+    ogg_reader.recalculate_last_crc().await.unwrap();
+
+    let mut offset = vorbis_meta.end_ptr;
+
+    let mut total_size = ogg_reader.reader.file_ptr + ogg_reader.reader.cursor;
+
+    loop {
+        let buf = vec![0; MAX_OGG_PAGE_SIZE as usize];
+        let (res, mut buf) = ogg_reader.reader.file.read_at(buf, offset as u64).await;
+        match res {
+            Ok(bytes_read) if bytes_read < MAX_OGG_PAGE_SIZE as usize => {
+                buf.resize(bytes_read, 0);
+                ogg_reader
+                    .reader
+                    .write_at_current_offset(buf)
+                    .await
+                    .unwrap();
+                total_size += bytes_read as u64;
+                break;
+            }
+            Ok(bytes_read) => {
+                ogg_reader
+                    .reader
+                    .write_at_current_offset(buf)
+                    .await
+                    .unwrap();
+                offset += bytes_read as i64;
+                total_size += bytes_read as u64;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    unsafe {
+        let fd = ogg_reader.reader.file.as_raw_fd();
+        libc::ftruncate64(fd, total_size.try_into().unwrap());
+    }
+    ogg_reader.reader.file.sync_data().await.unwrap();
 
     Ok(())
 }

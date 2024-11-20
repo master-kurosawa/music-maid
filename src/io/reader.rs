@@ -13,7 +13,7 @@ use crate::{
 };
 use anyhow::{anyhow, Context};
 use ignore::{WalkBuilder, WalkState};
-use std::sync::Mutex;
+use std::{cmp::min, sync::Mutex};
 use std::{
     io::{self, ErrorKind},
     path::PathBuf,
@@ -33,13 +33,16 @@ pub struct UringBufReader {
 }
 
 impl UringBufReader {
+    pub const fn current_offset(&self) -> u64 {
+        self.file_ptr + self.cursor
+    }
     /// writes buf at the current offset + cursor then increments cursor.
     pub async fn write_at_current_offset(&mut self, buf: Vec<u8>) -> anyhow::Result<()> {
         let (res, buf) = self
             .file
             .write_all_at(buf, self.file_ptr + self.cursor)
             .await;
-        self.skip(buf.len() as u64).await?;
+        self.skip_read(buf.len() as u64, 0).await?;
         Ok(res?)
     }
 }
@@ -66,7 +69,9 @@ impl UringBufReader {
                     "Reached end of file",
                 ));
             }
-            self.read_next(size).await?;
+            if size > 0 {
+                self.read_next(size).await?;
+            }
         }
 
         Ok(())
@@ -126,7 +131,10 @@ impl UringBufReader {
             self.extend_buf(amount + self.cursor as usize - self.buf.len() + BASE_SIZE)
                 .await?;
             if self.end_of_file {
-                return Ok(self.buf.get(self.cursor as usize..).unwrap());
+                return Ok(self
+                    .buf
+                    .get(self.cursor as usize..min(self.buf.len(), amount) + self.cursor as usize)
+                    .unwrap());
             }
         }
         let slice = self

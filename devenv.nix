@@ -5,7 +5,7 @@
   inputs,
   ...
 }: {
-  packages = with pkgs; [sqlx-cli sqlitebrowser openssl opustags vbindiff];
+  packages = with pkgs; [sqlx-cli sqlitebrowser openssl opustags vbindiff opusfile opusTools];
   enterShell = ''
     export DATABASE_URL=sqlite://dev.db
     sqlx database setup

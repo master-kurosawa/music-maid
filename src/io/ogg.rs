@@ -1,6 +1,6 @@
 use super::{checksum::crc32, reader::UringBufReader};
 use crate::formats::opus_ogg::OGG_MARKER;
-use anyhow::anyhow;
+use anyhow::{anyhow, Context};
 use std::{cmp::Ordering, io};
 
 pub struct OggPageReader<'a> {
@@ -9,10 +9,14 @@ pub struct OggPageReader<'a> {
     pub ends_stream: bool,
     pub segment_size: usize,
     pub last_header_ptr: usize,
+    pub page_number: u32,
     last_header: Vec<u8>,
 }
 
 impl<'a> OggPageReader<'a> {
+    pub fn header_length(&self) -> usize {
+        self.last_header.len()
+    }
     /// Creates a new OggPageReader and immediately parses first header
     /// returns Err if reader isn't positioned on header
     pub async fn new(reader: &'a mut UringBufReader) -> anyhow::Result<Self> {
@@ -22,6 +26,7 @@ impl<'a> OggPageReader<'a> {
             last_header: Vec::with_capacity(64),
             segment_size: 0,
             ends_stream: true,
+            page_number: 0,
             cursor: 0,
         };
         ogg_reader.parse_header().await?;
@@ -48,15 +53,17 @@ impl<'a> OggPageReader<'a> {
             header_prefix[0..4],
             OGG_MARKER,
             "OGG marker doesn't match. Possibly corrupted file: {}",
-            path.to_str().unwrap()
+            path.to_str().unwrap(),
         );
         let header: usize = header_prefix[5].into();
+        let page_number = u32::from_be_bytes(header_prefix[18..22].try_into()?);
         let segment_len: usize = header_prefix[26].into();
         let segments = self.reader.get_bytes(segment_len).await?;
         let segment_total = segments.iter().fold(0, |acc, x| acc + *x as usize);
         self.last_header.extend(segments);
         self.segment_size = segment_total;
-        self.ends_stream = header == 4 || segment_total % 255 > 0;
+        self.page_number = page_number;
+        self.ends_stream = header > 4 || segment_total % 255 > 0;
         self.cursor = 0;
         Ok(())
     }
@@ -100,11 +107,15 @@ impl<'a> OggPageReader<'a> {
     /// parses current stream till end.
     pub async fn parse_till_end(&mut self) -> anyhow::Result<Vec<u8>> {
         let mut result = Vec::with_capacity(self.segment_size - self.cursor);
+
+        self.check_cursor().await?;
         while !self.ends_stream {
             result.extend(self.get_bytes(self.segment_size - self.cursor).await?);
+
             self.check_cursor().await?;
         }
-        result.extend(self.get_bytes(self.segment_size - self.cursor).await?);
+        let funny = self.get_bytes(self.segment_size - self.cursor).await?;
+        result.extend(funny);
         Ok(result)
     }
 
@@ -114,16 +125,38 @@ impl<'a> OggPageReader<'a> {
     /// probably will explode if it skips beyond stream, into different one
     pub async fn skip(&mut self, size: usize) -> anyhow::Result<()> {
         let current_page_skip = self.segment_size - self.cursor;
-        if current_page_skip > size {
-            self.reader.skip(size as u64).await?;
-            self.cursor += size;
-            return Ok(());
+        match current_page_skip.cmp(&size) {
+            Ordering::Less => {}
+            Ordering::Greater => {
+                self.reader.skip(size as u64).await?;
+                self.cursor += size;
+                return Ok(());
+            }
+            Ordering::Equal => {
+                self.reader.skip(size as u64).await?;
+                self.cursor = self.segment_size;
+                self.parse_header().await?;
+                return Ok(());
+            }
         }
+
         // crazy ceiled integer division
         let segments_per_page = (self.segment_size + 254) / 255;
-        let page_header_size = 27 + segments_per_page;
-        let filled_pages_amount = ((size - current_page_skip) / 255) / segments_per_page;
 
+        let page_header_size = 27 + segments_per_page;
+
+        // Works 100% times whenever it does work.
+        let lol = ((size - current_page_skip) % self.segment_size < self.segment_size / 2) as usize;
+        let mut filled_pages_amount = ((size - current_page_skip) / 255) / segments_per_page;
+        if filled_pages_amount <= 1 {
+            self.reader.skip(current_page_skip as u64).await?;
+            self.cursor = self.segment_size;
+            self.parse_header().await?;
+            self.reader.skip((size - current_page_skip) as u64).await?;
+            self.cursor += size - current_page_skip;
+            return Ok(());
+        }
+        filled_pages_amount -= lol;
         let filled_skip_size = filled_pages_amount * page_header_size;
         let skip_with_headers = size + filled_skip_size + page_header_size;
 
@@ -136,10 +169,12 @@ impl<'a> OggPageReader<'a> {
             )
             .await?;
         self.cursor = self.segment_size;
+
+        let x = &self.reader.buf[0..];
         self.parse_header().await?;
 
         self.reader.skip(leftover as u64).await?;
-        self.cursor = leftover;
+        self.cursor += leftover;
         self.check_cursor().await?;
 
         Ok(())
@@ -201,7 +236,8 @@ impl<'a> OggPageReader<'a> {
             } else {
                 self.recalculate_last_crc().await?;
             }
-            self.check_cursor().await?;
+
+            self.parse_header().await?;
         }
 
         if !remaining_data.is_empty() {
@@ -219,6 +255,14 @@ impl<'a> OggPageReader<'a> {
         }
         self.write_stream(&vec![0; self.segment_size - self.cursor])
             .await?;
+        Ok(())
+    }
+    pub async fn rehash_headers(&mut self) -> anyhow::Result<()> {
+        while !self.ends_stream {
+            self.skip(self.segment_size - self.cursor).await?;
+            self.recalculate_last_crc().await?;
+            self.check_cursor().await?;
+        }
         Ok(())
     }
 }

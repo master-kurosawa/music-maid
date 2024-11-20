@@ -8,6 +8,7 @@ anyhow = "1.0.90"
 base64 = "0.21"
 futures = "0.3.31"
 ignore = "0.4"
+libc = "0.2.162"
 sqlx = {version = "0.8.2", features =["sqlite", "runtime-tokio-native-tls", "macros"]}
 sysinfo = "0.32.0"
 tokio = {version ="1.37.0", features=["full"]}

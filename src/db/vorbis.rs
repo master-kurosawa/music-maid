@@ -30,6 +30,7 @@ pub struct VorbisMeta {
     pub id: Option<i64>,
     pub file_id: Option<i64>,
     pub file_ptr: i64,
+    pub end_ptr: i64,
     pub comment_amount_ptr: i64,
     pub vendor: String,
 }
@@ -50,8 +51,13 @@ impl VorbisComment {
         self,
         reader: &mut OggPageReader<'a>,
     ) -> anyhow::Result<Vec<u8>> {
-        let value = if let Some(val) = self.value {
-            val.into_bytes()
+        if let Some(val) = self.value {
+            let mut comment = Vec::with_capacity(self.size as usize);
+            comment.extend((self.size as u32 - 4).to_le_bytes());
+            comment.extend(self.key.into_bytes());
+            comment.push(b'=');
+            comment.extend(val.into_bytes());
+            Ok(comment)
         } else {
             reader
                 .reader
@@ -67,13 +73,8 @@ impl VorbisComment {
                     (self.file_ptr as u64 - reader.reader.file_ptr - reader.reader.cursor) as usize,
                 )
                 .await?;
-            reader.get_bytes(self.size as usize).await?
-        };
-        let mut comment = Vec::with_capacity(self.size as usize + 4);
-        comment.extend(self.size.to_le_bytes());
-        comment.extend(self.key.into_bytes());
-        comment.extend(value);
-        Ok(comment)
+            return reader.get_bytes(self.size as usize).await;
+        }
     }
     pub async fn from_meta_id<'a, E>(meta_id: i64, pool: E) -> Result<Vec<Self>, sqlx::Error>
     where
@@ -211,6 +212,7 @@ impl VorbisComment {
         let vorbis_meta = VorbisMeta {
             id: None,
             file_ptr: block_ptr,
+            end_ptr: block_ptr + block_length as i64,
             comment_amount_ptr,
             file_id: None,
             vendor,
@@ -234,9 +236,10 @@ impl VorbisMeta {
         E: Executor<'a, Database = Sqlite>,
     {
         let id = sqlx::query!(
-            "INSERT INTO vorbis_meta(file_id, file_ptr, vendor, comment_amount_ptr) VALUES (?, ?, ?, ?)",
+            "INSERT INTO vorbis_meta(file_id, file_ptr, end_ptr, vendor, comment_amount_ptr) VALUES (?, ?, ?, ?, ?)",
             self.file_id,
             self.file_ptr,
+            self.end_ptr,
             self.vendor,
             self.comment_amount_ptr
         )
