@@ -1,16 +1,20 @@
 {
   pkgs,
-  lib,
-  config,
   inputs,
   ...
 }: {
   packages = with pkgs; [
     inputs.mbslave.packages.${system}.default
-    pgadmin4-desktopmode
     sqlx-cli
     protobuf_26
+    postgresql
   ];
+
+  languages.typescript.enable = true;
+  languages.javascript = {
+    enable = true;
+    bun.enable = true;
+  };
 
   languages.rust = {
     enable = true;
