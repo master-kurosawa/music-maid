@@ -4,6 +4,7 @@ use libc::printf;
 use oni::client;
 
 mod cli;
+mod models;
 mod oni;
 
 #[tokio::main]
@@ -12,6 +13,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // let uds_addr = SocketAddr::from_abstract_name(b"musicmaid_oni")?;
     // let uds_std_listener = std::os::unix::net::UnixStream::bind_addr(&uds_addr)?;
+    //
+
+    let client = match cli.command {
+        Some(cli::Commands::Oni) => None,
+        Some(_) => oni::client::Client::new().await.ok(),
+        None => None,
+    };
 
     match cli.command {
         None => return Ok(()),
@@ -20,8 +28,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
         Some(cli::Commands::Search { query, service }) => {
             println!("Searching!");
-            let result = client::quit().await;
-            println!("{result:?}");
+            let _ = client
+                .expect("standalone mode not supported yet!")
+                .search(query, service)
+                .await?;
+
+            // println!("{result:?}");
         }
     }
 

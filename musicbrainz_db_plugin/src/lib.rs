@@ -12,9 +12,8 @@ pub async fn create_client(
 }
 
 pub async fn search(client: &mut SearchClient<Channel>, query: String) {
-    let request = tonic::Request::new(SearchReleaseRequest {
-        name: "kuroi uta".to_string(),
-    });
+    let request = tonic::Request::new(SearchReleaseRequest { name: query });
     let x = client.search_release(request).await;
-    println!("{:?}", x)
+    println!("HUH?? {:?}", x);
+    ()
 }

@@ -8,32 +8,38 @@ use tonic::{
     Request, Response, Status,
 };
 
+use crate::cli::SearchService;
 use crate::oni::oni::{
     oni_control_server::{OniControl, OniControlServer},
-    QuitReply, QuitRequest,
+    SearchRequest, SearchResponse,
 };
 
 #[derive(Default)]
-pub struct MyOniControl {
-    shutdown_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
-}
+pub struct MyOniControl {}
 
 #[tonic::async_trait]
 impl OniControl for MyOniControl {
-    async fn quit(&self, request: Request<QuitRequest>) -> Result<Response<QuitReply>, Status> {
-        let conn_info = request.extensions().get::<UdsConnectInfo>().unwrap();
-        println!("{conn_info:?}");
+    async fn search(
+        &self,
+        request: Request<SearchRequest>,
+    ) -> Result<Response<SearchResponse>, Status> {
+        // let conn_info = request.extensions().get::<UdsConnectInfo>().unwrap();
+        // println!("{conn_info:?}");
+        println!("{request:?}");
 
-        let tx = self.shutdown_tx.lock().await.take();
+        let search_service: SearchService = request.get_ref().search_service.into();
 
-        if let Some(tx) = tx {
-            let _ = tx.send(());
-            println!("FUCK you!!!!");
-        } else {
-            println!("Motherfucker {tx:?}");
+        match search_service {
+            SearchService::Local => todo!(),
+            SearchService::LocalMusicbrainz => {
+                let mut client = musicbrainz_db_client::create_client()
+                    .await
+                    .expect("Hurr durr");
+                musicbrainz_db_client::search(&mut client, request.get_ref().query.clone()).await;
+            }
         }
 
-        Ok(Response::new(QuitReply {}))
+        Ok(Response::new(SearchResponse {}))
     }
 }
 
@@ -43,18 +49,13 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let uds_listener = UnixListener::from_std(uds_std_listener)?;
     let uds_stream = UnixListenerStream::new(uds_listener);
 
-    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let oni_control_service = MyOniControl {
-        shutdown_tx: Arc::new(Mutex::new(Some(shutdown_tx))),
         ..MyOniControl::default()
     };
 
     Server::builder()
         .add_service(OniControlServer::new(oni_control_service))
-        // .serve_with_incoming(uds_stream)
-        .serve_with_incoming_shutdown(uds_stream, async {
-            shutdown_rx.await.ok();
-        })
+        .serve_with_incoming(uds_stream)
         .await?;
 
     Ok(())

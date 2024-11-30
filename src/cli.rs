@@ -14,6 +14,25 @@ pub enum SearchService {
     LocalMusicbrainz,
 }
 
+impl From<SearchService> for i32 {
+    fn from(value: SearchService) -> Self {
+        match value {
+            SearchService::Local => 0,
+            SearchService::LocalMusicbrainz => 1,
+        }
+    }
+}
+
+impl From<i32> for SearchService {
+    fn from(value: i32) -> Self {
+        match value {
+            0 => Self::Local,
+            1 => Self::LocalMusicbrainz,
+            _ => Self::Local,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 pub enum Commands {
     /// Daemonize musicmaid opening an abstract unix socket for communication

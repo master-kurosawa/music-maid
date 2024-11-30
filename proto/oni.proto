@@ -3,8 +3,16 @@ syntax = "proto3";
 package oni;
 
 service OniControl {
-  rpc Quit (QuitRequest) returns (QuitReply);
+  rpc Search (SearchRequest) returns (SearchResponse);
 }
 
-message QuitRequest {}
-message QuitReply {}
+message SearchRequest {
+  string query = 1;
+  SearchService search_service = 2;
+}
+message SearchResponse {}
+
+enum SearchService {
+  LOCAL = 0;
+  LOCAL_MUSICBRAINZ = 1;
+}
