@@ -1,10 +1,5 @@
 use crate::{
-    db::{
-        audio_file::{AudioFile, AudioFileMeta},
-        padding::Padding,
-        picture::Picture,
-        vorbis::{VorbisComment, FLAC_MARKER},
-    },
+    db::vorbis::FLAC_MARKER,
     formats::{
         flac::parse_flac,
         opus_ogg::{parse_ogg_pages, OGG_MARKER},
@@ -19,9 +14,22 @@ use std::{
     path::PathBuf,
     sync::Arc,
 };
+use tokio::sync::Semaphore;
 use tokio_uring::fs::File;
 
 const BASE_SIZE: usize = 8196;
+
+pub struct ThrottleConfig {
+    max_concurrent_tasks: usize,
+}
+
+impl ThrottleConfig {
+    pub fn new(max_concurrent_tasks: usize) -> Self {
+        Self {
+            max_concurrent_tasks,
+        }
+    }
+}
 
 pub struct UringBufReader {
     pub buf: Vec<u8>,
@@ -33,21 +41,21 @@ pub struct UringBufReader {
 }
 
 impl UringBufReader {
-    pub const fn current_offset(&self) -> u64 {
-        self.file_ptr + self.cursor
-    }
     /// writes buf at the current offset + cursor then increments cursor.
     pub async fn write_at_current_offset(&mut self, buf: Vec<u8>) -> anyhow::Result<()> {
-        let (res, buf) = self
-            .file
-            .write_all_at(buf, self.file_ptr + self.cursor)
-            .await;
-        self.skip_read(buf.len() as u64, 0).await?;
+        let buf_len = buf.len() as u64;
+        let (res, buf) = self.file.write_all_at(buf, self.current_offset()).await;
+        drop(buf);
+        self.skip_read(buf_len, 0).await?;
         Ok(res?)
     }
 }
 
 impl UringBufReader {
+    #[inline]
+    pub const fn current_offset(&self) -> u64 {
+        self.file_ptr + self.cursor
+    }
     pub fn new(file: File, path: PathBuf) -> Self {
         UringBufReader {
             buf: Vec::new(),
@@ -59,7 +67,7 @@ impl UringBufReader {
         }
     }
     /// skips u64 bytes, then allocates usize bytes if needed
-    /// if cursor is at EOF, returns io::Error
+    /// if cursor is at EOF, returns io::Error instead of allocating
     pub async fn skip_read(&mut self, skip: u64, size: usize) -> Result<(), io::Error> {
         self.cursor += skip;
         if self.cursor as usize >= self.buf.len() {
@@ -71,13 +79,15 @@ impl UringBufReader {
             }
             if size > 0 {
                 self.read_next(size).await?;
+            } else {
+                self.buf.drain(0..size);
             }
         }
 
         Ok(())
     }
     /// skips u64 bytes, then allocates 8196 bytes if needed
-    /// if cursor is at EOF, returns io::Error
+    /// if cursor is at EOF, returns io::Error instead of allocating
     pub async fn skip(&mut self, size: u64) -> Result<(), io::Error> {
         self.skip_read(size, BASE_SIZE).await
     }
@@ -90,6 +100,7 @@ impl UringBufReader {
         size: usize,
         offset: u64,
     ) -> Result<usize, std::io::Error> {
+        self.buf.clear();
         let buf = vec![0; size];
         self.cursor = 0;
         self.file_ptr = offset;
@@ -120,15 +131,16 @@ impl UringBufReader {
     /// reads size from current file_ptr + cursor
     /// doesn't read from END OF BUFFER unless cursor is there
     pub async fn read_next(&mut self, size: usize) -> Result<usize, io::Error> {
-        self.read_at_offset(size, self.file_ptr + self.cursor).await
+        self.read_at_offset(size, self.current_offset()).await
     }
 
     /// gets usize bytes from the current buffer, extending it if needed
     /// extends by missing amount + additional 8196 bytes
     /// returns rest of the buffer if it reaches EOF
     pub async fn get_bytes(&mut self, amount: usize) -> Result<&[u8], io::Error> {
-        if self.buf.len() <= amount + self.cursor as usize {
-            self.extend_buf(amount + self.cursor as usize - self.buf.len() + BASE_SIZE)
+        let buf_len = self.buf.len();
+        if buf_len <= amount + self.cursor as usize {
+            self.extend_buf(amount + self.cursor as usize - buf_len + BASE_SIZE)
                 .await?;
             if self.end_of_file {
                 return Ok(self
@@ -154,6 +166,7 @@ impl UringBufReader {
     }
 }
 
+/// Walks directory recursevly in parallel and returns file paths
 pub fn walk_dir(path: &str) -> Vec<PathBuf> {
     let paths: Arc<Mutex<Vec<Arc<PathBuf>>>> = Arc::new(Mutex::new(Vec::new()));
     let builder = WalkBuilder::new(path);
@@ -182,13 +195,21 @@ pub fn walk_dir(path: &str) -> Vec<PathBuf> {
         .collect::<Vec<PathBuf>>()
 }
 
-/// CALL WITH uring RUNTIME
-pub async fn load_data_from_paths(paths: Vec<PathBuf>) {
+/// requires io_uring runtime
+pub async fn load_data_from_paths(paths: Vec<PathBuf>, config: ThrottleConfig) {
     let mut tasks = Vec::new();
+    let semaphore = Arc::new(Semaphore::new(config.max_concurrent_tasks));
     let queue = Arc::new(tokio::sync::Mutex::new(TaskQueue::new()));
     for path in paths {
+        let semaphore = Arc::clone(&semaphore);
         let queue = Arc::clone(&queue);
-        let spawn = tokio_uring::spawn(async move { read_with_uring(path, queue).await.unwrap() });
+        let spawn = tokio_uring::spawn(async move {
+            let _permit = match semaphore.acquire().await {
+                Ok(permit) => permit,
+                Err(_) => return Err(anyhow!("Failed to acquire semaphore {path:?}")),
+            };
+            read_with_uring(path, queue).await
+        });
         tasks.push(spawn);
     }
     for task in tasks {
@@ -236,8 +257,7 @@ async fn read_with_uring(
         }
         _ => return Ok(()),
     };
-
+    reader.buf.clear();
     queue.lock().await.push(file_meta).await;
-
     Ok(())
 }

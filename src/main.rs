@@ -2,26 +2,21 @@ pub mod db;
 mod formats;
 mod io;
 pub mod queue;
-use db::{
-    audio_file::AudioFile,
-    vorbis::{VorbisComment, VorbisMeta},
-};
+use db::audio_file::AudioFile;
 use formats::opus_ogg::remove_comments;
 use io::{
     ogg::OggPageReader,
-    reader::{load_data_from_paths, walk_dir, UringBufReader},
+    reader::{load_data_from_paths, walk_dir, ThrottleConfig, UringBufReader},
 };
 use sqlx::SqlitePool;
 use std::{env, error::Error};
-use tokio_uring::fs::{File, OpenOptions};
+use tokio_uring::fs::OpenOptions;
 
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     sysinfo::set_open_files_limit(10000);
     if env::args().last().unwrap() == "rehash" {
         let crazy_path = "./x/wheeler.opus".to_owned();
         tokio_uring::start(async {
-            let pool = SqlitePool::connect("sqlite://dev.db").await.unwrap();
-
             let file = OpenOptions::new()
                 .write(true)
                 .read(true)
@@ -29,7 +24,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                 .await
                 .unwrap();
             let mut reader = UringBufReader::new(file, crazy_path.into());
-            let bytes_read = reader.read_next(8196).await.unwrap();
+            let _bytes_read = reader.read_next(8196).await.unwrap();
             let mut reader = OggPageReader::new(&mut reader).await.unwrap();
             reader.parse_till_end().await.unwrap();
             reader.recalculate_last_crc().await.unwrap();
@@ -59,10 +54,11 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         return Ok(());
     }
 
-    let paths = walk_dir("./x");
+    let paths = walk_dir("./tmp");
+    let conf = ThrottleConfig::new(16);
     tokio_uring::builder()
         .entries(1024)
-        .start(async { load_data_from_paths(paths).await });
+        .start(async { load_data_from_paths(paths, conf).await });
 
     Ok(())
 }

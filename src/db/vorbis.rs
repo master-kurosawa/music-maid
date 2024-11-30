@@ -3,10 +3,7 @@ use sqlx::{prelude::FromRow, Executor, Sqlite};
 use crate::io::ogg::OggPageReader;
 
 pub const FLAC_MARKER: [u8; 4] = [0x66, 0x4C, 0x61, 0x43];
-// Used for checking if 4 byte list length is present in vorbis.
-// 0x20 is space ' ' symbol. Smallest utf-8 printable one
-pub const SMALLEST_VORBIS_4BYTE_POSSIBLE: u32 = u32::from_le_bytes([0x20, 0x20, 0x20, 0x20]);
-
+/// #TODO incomplete list
 pub const VORBIS_FIELDS_LOWER: [&str; 15] = [
     "title",
     "version",
@@ -69,7 +66,7 @@ impl VorbisComment {
             reader.cursor = reader.segment_size;
             reader.parse_header().await?;
             reader
-                .skip(
+                .safe_skip(
                     (self.file_ptr as u64 - reader.reader.file_ptr - reader.reader.cursor) as usize,
                 )
                 .await?;
@@ -185,7 +182,7 @@ impl VorbisComment {
                     size: comment_len as i64 + 4,
                     last_ogg_header_ptr: None,
                     key,
-                    file_ptr: block_ptr as i64 + comment_cursor as i64 - 4,
+                    file_ptr: block_ptr + comment_cursor as i64 - 4,
                 })
             } else {
                 println!(
@@ -194,8 +191,6 @@ impl VorbisComment {
                         &vorbis_block[comment_cursor..comment_cursor + comment_len]
                     )
                 );
-                //return Err(anyhow!("Corrupted comment: {comment}"));
-                // skip the corrupted comments for now
             }
 
             comment_cursor += comment_len + 4;
@@ -208,7 +203,7 @@ impl VorbisComment {
                     as usize;
         }
 
-        assert_eq!(comments.len(), comment_amount + 1); // +1 for vendor
+        assert_eq!(comments.len(), comment_amount);
         let vorbis_meta = VorbisMeta {
             id: None,
             file_ptr: block_ptr,

@@ -51,6 +51,9 @@ impl TaskQueue {
             for (mut vorbis_meta, vorbis) in item.comments {
                 vorbis_meta.file_id = Some(file_id);
                 let meta_id = vorbis_meta.insert(&mut *transaction).await.unwrap();
+                if vorbis.is_empty() {
+                    continue;
+                }
                 VorbisComment::insert_many(meta_id, vorbis, &mut *transaction)
                     .await
                     .unwrap();

@@ -3,7 +3,7 @@ use crate::{
         audio_file::{AudioFile, AudioFileMeta},
         padding::Padding,
         picture::Picture,
-        vorbis::{VorbisComment, VorbisMeta},
+        vorbis::VorbisComment,
     },
     io::reader::UringBufReader,
 };
@@ -30,7 +30,7 @@ impl PADDING_MARKER {
     const MARKER: u8 = 0b00000001;
 }
 
-pub async fn parse_flac(reader: &mut UringBufReader) -> anyhow::Result<(AudioFileMeta)> {
+pub async fn parse_flac(reader: &mut UringBufReader) -> anyhow::Result<AudioFileMeta> {
     let audio_file = AudioFile {
         id: None,
         path: reader.path.to_string_lossy().to_string(),
@@ -62,7 +62,7 @@ pub async fn parse_flac(reader: &mut UringBufReader) -> anyhow::Result<(AudioFil
                 vorbis_sections.push(VorbisComment::parse_block(vorbis_block, vorbis_ptr).await?);
             }
             VORBIS_COMMENT_MARKER::END_OF_BLOCK => {
-                let vorbis_ptr = (reader.file_ptr + reader.cursor) as i64;
+                let vorbis_ptr = reader.current_offset() as i64;
                 let vorbis_block = reader.get_bytes(block_length).await?;
 
                 if vorbis_block.len() < block_length {
@@ -85,7 +85,7 @@ pub async fn parse_flac(reader: &mut UringBufReader) -> anyhow::Result<(AudioFil
                 paddings.push(Padding {
                     id: None,
                     file_id: None,
-                    file_ptr: Some((reader.file_ptr + reader.cursor) as i64),
+                    file_ptr: Some(reader.current_offset() as i64),
                     byte_size: Some(block_length as i64),
                 });
                 reader.skip(block_length as u64).await?;
@@ -94,7 +94,7 @@ pub async fn parse_flac(reader: &mut UringBufReader) -> anyhow::Result<(AudioFil
                 paddings.push(Padding {
                     id: None,
                     file_id: None,
-                    file_ptr: Some((reader.file_ptr + reader.cursor) as i64),
+                    file_ptr: Some(reader.current_offset() as i64),
                     byte_size: Some(block_length as i64),
                 });
 
@@ -118,7 +118,7 @@ pub async fn parse_flac(reader: &mut UringBufReader) -> anyhow::Result<(AudioFil
     })
 }
 async fn parse_picture(reader: &mut UringBufReader) -> anyhow::Result<Picture> {
-    let file_ptr = (reader.cursor + reader.file_ptr) as i64;
+    let file_ptr = reader.current_offset() as i64;
     let picture_type = reader.read_u32().await?;
 
     let mime_len = reader.read_u32().await? as usize;

@@ -1,24 +1,19 @@
-use std::os::fd::AsRawFd;
-
-use base64::{engine::general_purpose, Engine as _};
-use tokio_uring::fs::{File, OpenOptions};
-
-pub const OGG_MARKER: [u8; 4] = [0x4F, 0x67, 0x67, 0x53];
 use crate::{
     db::{
         audio_file::{AudioFile, AudioFileMeta},
         padding::Padding,
         picture::Picture,
-        vorbis::{
-            self, VorbisComment, VorbisMeta, SMALLEST_VORBIS_4BYTE_POSSIBLE, VORBIS_FIELDS_LOWER,
-        },
+        vorbis::{VorbisComment, VorbisMeta},
     },
     io::{ogg::OggPageReader, reader::UringBufReader},
 };
+use base64::{engine::general_purpose, Engine as _};
+use std::os::fd::AsRawFd;
+use tokio_uring::fs::OpenOptions;
 
+pub const OGG_MARKER: [u8; 4] = [0x4F, 0x67, 0x67, 0x53];
 const MAX_OGG_PAGE_SIZE: u32 = 65_307;
-const VORBIS_SIZE_LIMIT: u32 = MAX_OGG_PAGE_SIZE; // skips any comments > this size
-
+const VORBIS_SIZE_LIMIT: u32 = MAX_OGG_PAGE_SIZE; // skips values of any comments > this size
 const OPUS_MARKER: [u8; 8] = [0x4F, 0x70, 0x75, 0x73, 0x48, 0x65, 0x61, 0x64];
 const OPUS_TAGS_MARKER: [u8; 8] = [0x4F, 0x70, 0x75, 0x73, 0x54, 0x61, 0x67, 0x73];
 const VORBIS_PICTURE_MARKER: [u8; 22] = [
@@ -37,130 +32,134 @@ async fn parse_opus_vorbis<'a>(
     let mut pictures = Vec::new();
     let mut padding = Vec::new();
 
-    let vorbis_ptr = (ogg_reader.reader.file_ptr + ogg_reader.reader.cursor) as i64;
+    let vorbis_ptr = ogg_reader.reader.current_offset() as i64;
+
     let vendor_bytes: [u8; 4] = ogg_reader.get_bytes(4).await?.try_into().unwrap();
-    let vendor_len = u32::from_le_bytes(vendor_bytes);
-    let vendor =
-        String::from_utf8_lossy(&ogg_reader.get_bytes(vendor_len as usize).await?).to_string();
-    let comment_amount_ptr = (ogg_reader.reader.file_ptr + ogg_reader.reader.cursor) as i64;
+    let vendor = String::from_utf8_lossy(
+        &ogg_reader
+            .get_bytes(u32::from_le_bytes(vendor_bytes) as usize)
+            .await?,
+    )
+    .to_string();
+
+    let comment_amount_ptr = ogg_reader.reader.current_offset() as i64;
 
     let comment_amount_bytes: [u8; 4] = ogg_reader.get_bytes(4).await?.try_into().unwrap();
-    let comment_len_bytes: [u8; 4] = ogg_reader.get_bytes(4).await?.try_into().unwrap();
 
-    let comment_amount = u32::from_le_bytes(comment_amount_bytes);
-    let mut comment_len = u32::from_le_bytes(comment_len_bytes);
-    let mut vorbis_end_ptr = 0;
-    let mut comment_counter = 0;
+    let mut vorbis_end_ptr = ogg_reader.reader.current_offset();
 
-    loop {
-        let comment_ptr = ogg_reader.reader.file_ptr + ogg_reader.reader.cursor - 4;
-        comment_counter += 1;
-        if comment_len > VORBIS_SIZE_LIMIT {
-            let mut comment_key = Vec::with_capacity(VORBIS_PICTURE_MARKER.len());
-            // glowing
-            loop {
-                let k = ogg_reader.get_bytes(1).await?[0];
-                if k == b'=' {
-                    break;
+    if comment_amount_bytes != [0; 4] {
+        let comment_amount = u32::from_le_bytes(comment_amount_bytes);
+
+        let comment_len_bytes: [u8; 4] = ogg_reader.get_bytes(4).await?.try_into().unwrap();
+        let mut comment_len = u32::from_le_bytes(comment_len_bytes);
+
+        let mut comment_counter = 0;
+
+        loop {
+            let comment_ptr = ogg_reader.reader.current_offset() - 4;
+            comment_counter += 1;
+            if comment_len > VORBIS_SIZE_LIMIT {
+                let mut comment_key = Vec::with_capacity(VORBIS_PICTURE_MARKER.len());
+                // glowing ( extracts comment key without worrying about page headers )
+                loop {
+                    let k = ogg_reader.get_bytes(1).await?[0];
+                    if k == b'=' {
+                        break;
+                    }
+                    comment_key.push(k);
                 }
-                comment_key.push(k);
-            }
 
-            comments.push(VorbisComment {
-                id: None,
-                meta_id: None,
-                key: String::from_utf8_lossy(&comment_key).to_string(),
-                size: comment_len as i64 + 4,
-                last_ogg_header_ptr: Some(ogg_reader.last_header_ptr as i64),
-                value: None,
-                file_ptr: comment_ptr as i64,
-            });
-
-            let skipped = if comment_key == VORBIS_PICTURE_MARKER
-                || comment_key == VORBIS_PICTURE_MARKER_UPPER
-            {
-                let (skipped, picture) = parse_picture_meta(ogg_reader, comment_ptr as i64).await?;
-                pictures.push(picture);
-                skipped
-            } else {
-                0
-            };
-
-            ogg_reader
-                .skip(comment_len as usize - comment_key.len() - skipped as usize - 1)
-                .await?;
-        } else {
-            let comment = ogg_reader.get_bytes(comment_len as usize).await?;
-            if let Some(picture_check) = comment.get(0..VORBIS_PICTURE_MARKER.len()) {
-                if picture_check == VORBIS_PICTURE_MARKER
-                    || picture_check == VORBIS_PICTURE_MARKER_UPPER
-                {
-                    pictures.push(Picture::from_picture_block(
-                        &general_purpose::STANDARD
-                            .decode(&comment[VORBIS_PICTURE_MARKER.len() + 1..])
-                            .unwrap(),
-                        comment_ptr as i64,
-                        true,
-                    ));
-                }
-            }
-            if let Some((key, val)) = VorbisComment::into_key_val(&comment) {
                 comments.push(VorbisComment {
-                    meta_id: None,
                     id: None,
-                    key,
+                    meta_id: None,
+                    key: String::from_utf8_lossy(&comment_key).to_string(),
                     size: comment_len as i64 + 4,
-                    file_ptr: comment_ptr as i64,
                     last_ogg_header_ptr: Some(ogg_reader.last_header_ptr as i64),
-                    value: Some(val),
+                    value: None,
+                    file_ptr: comment_ptr as i64,
                 });
+
+                let skipped = if comment_key == VORBIS_PICTURE_MARKER
+                    || comment_key == VORBIS_PICTURE_MARKER_UPPER
+                {
+                    let (skipped, picture) =
+                        parse_picture_meta(ogg_reader, comment_ptr as i64).await?;
+
+                    pictures.push(picture);
+                    skipped
+                } else {
+                    0
+                };
+
+                ogg_reader.reader.extend_buf(comment_len as usize).await?;
+                ogg_reader
+                    .safe_skip(comment_len as usize - comment_key.len() - skipped as usize - 1)
+                    .await?;
             } else {
-                println!("corrupted comment {:?}", String::from_utf8_lossy(&comment));
-                //return Err(anyhow!("Corrupted comment: {comment}"));
-                // skip the corrupted comments for now
+                let comment = ogg_reader.get_bytes(comment_len as usize).await?;
+                if let Some(picture_check) = comment.get(0..VORBIS_PICTURE_MARKER.len()) {
+                    if picture_check == VORBIS_PICTURE_MARKER
+                        || picture_check == VORBIS_PICTURE_MARKER_UPPER
+                    {
+                        pictures.push(Picture::from_picture_block(
+                            &general_purpose::STANDARD
+                                .decode(&comment[VORBIS_PICTURE_MARKER.len() + 1..])
+                                .unwrap(),
+                            comment_ptr as i64,
+                            true,
+                        ));
+                    }
+                }
+                if let Some((key, val)) = VorbisComment::into_key_val(&comment) {
+                    comments.push(VorbisComment {
+                        meta_id: None,
+                        id: None,
+                        key,
+                        size: comment_len as i64 + 4,
+                        file_ptr: comment_ptr as i64,
+                        last_ogg_header_ptr: Some(ogg_reader.last_header_ptr as i64),
+                        value: Some(val),
+                    });
+                } else {
+                    println!("corrupted comment {:?}", String::from_utf8_lossy(&comment));
+                    // skip the corrupted comments for now
+                }
             }
-        }
-        if comment_counter == comment_amount
-            || (ogg_reader.ends_stream && ogg_reader.segment_size - ogg_reader.cursor == 0)
-        {
-            vorbis_end_ptr = ogg_reader.reader.current_offset();
+            if comment_counter == comment_amount
+                || (ogg_reader.ends_stream && ogg_reader.page_left() == 0)
+            {
+                vorbis_end_ptr = ogg_reader.reader.current_offset();
+                if ogg_reader.get_bytes(4).await? == [0; 4] {
+                    // padding found
+                    ogg_reader.reader.cursor -= 4;
+                    ogg_reader.cursor -= 4;
+                    let file_ptr = ogg_reader.reader.current_offset();
+                    let padding_len = ogg_reader.parse_till_end().await?.len();
+                    vorbis_end_ptr = ogg_reader.reader.current_offset();
+
+                    if padding_len > 0 {
+                        padding.push(Padding {
+                            id: None,
+                            file_id: None,
+                            byte_size: Some(padding_len as i64),
+                            file_ptr: Some(file_ptr as i64),
+                        });
+                    }
+                }
+                break;
+            }
+
             let comment_len_bytes: [u8; 4] =
                 if let Ok(comment_len_bytes) = ogg_reader.get_bytes(4).await?.try_into() {
                     comment_len_bytes
                 } else {
                     break;
                 };
-
             comment_len = u32::from_le_bytes(comment_len_bytes);
-            if comment_len == 0 {
-                // padding found
-                ogg_reader.reader.cursor -= 4;
-                ogg_reader.cursor -= 4;
-                let file_ptr = ogg_reader.reader.current_offset();
-                let padding_len = ogg_reader.parse_till_end().await?.len();
-                vorbis_end_ptr = ogg_reader.reader.current_offset();
-                if padding_len > 0 {
-                    padding.push(Padding {
-                        id: None,
-                        file_id: None,
-                        byte_size: Some(padding_len as i64),
-                        file_ptr: Some(file_ptr as i64),
-                    });
-                }
-            }
-
-            break;
         }
-
-        let comment_len_bytes: [u8; 4] =
-            if let Ok(comment_len_bytes) = ogg_reader.get_bytes(4).await?.try_into() {
-                comment_len_bytes
-            } else {
-                break;
-            };
-
-        comment_len = u32::from_le_bytes(comment_len_bytes);
     }
+
     let meta = VorbisMeta {
         vendor,
         comment_amount_ptr,
@@ -243,7 +242,7 @@ async fn parse_picture_meta<'a>(
 }
 
 pub async fn parse_ogg_pages(reader: &mut UringBufReader) -> anyhow::Result<AudioFileMeta> {
-    reader.cursor -= 4;
+    reader.cursor -= 4; // Go back to OGGs
     let mut ogg_reader = OggPageReader::new(reader).await?;
 
     let first_page = ogg_reader.parse_till_end().await?;
@@ -305,11 +304,11 @@ pub async fn remove_comments(meta: AudioFileMeta, names: Vec<String>) -> anyhow:
     ogg_reader.parse_header().await.unwrap();
     let (vorbis_meta, comments) = &meta.comments[0]; // oggs can contain only 1 meta field
     let mut comment_bytes = Vec::new();
-    let mut removed_comment_size = 0;
+    let mut _removed_comment_size = 0;
     let mut kept_comments: u32 = 0;
     for comment in comments.iter() {
         if names.contains(&comment.key) {
-            removed_comment_size += comment.size;
+            _removed_comment_size += comment.size;
         } else {
             let comment = comment
                 .to_owned()
@@ -327,7 +326,7 @@ pub async fn remove_comments(meta: AudioFileMeta, names: Vec<String>) -> anyhow:
     ogg_reader.parse_header().await?;
     ogg_reader.parse_till_end().await?;
     ogg_reader.parse_header().await?;
-    ogg_reader.skip(12 + vorbis_meta.vendor.len()).await?;
+    ogg_reader.safe_skip(12 + vorbis_meta.vendor.len()).await?;
     ogg_reader
         .write_stream(&kept_comments.to_le_bytes())
         .await
