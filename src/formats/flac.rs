@@ -5,9 +5,8 @@ use crate::{
         picture::Picture,
         vorbis::VorbisComment,
     },
-    io::reader::UringBufReader,
+    io::reader::{Corruption, UringBufReader},
 };
-use anyhow::anyhow;
 
 #[allow(non_camel_case_types)]
 struct VORBIS_COMMENT_MARKER;
@@ -30,7 +29,7 @@ impl PADDING_MARKER {
     const MARKER: u8 = 0b00000001;
 }
 
-pub async fn parse_flac(reader: &mut UringBufReader) -> anyhow::Result<AudioFileMeta> {
+pub async fn parse_flac(reader: &mut UringBufReader) -> Result<AudioFileMeta, Corruption> {
     let audio_file = AudioFile {
         id: None,
         path: reader.path.to_string_lossy().to_string(),
@@ -54,24 +53,46 @@ pub async fn parse_flac(reader: &mut UringBufReader) -> anyhow::Result<AudioFile
                 let vorbis_ptr = (reader.file_ptr + reader.cursor) as i64;
                 let vorbis_block = reader.get_bytes(block_length).await?;
                 if vorbis_block.len() < block_length {
-                    return Err(anyhow!(
-                        "Not enough bytes for vorbis block. Length: {block_length}"
-                    ));
+                    return Err(Corruption {
+                        message: format!(
+                            "Not enough bytes for vorbis block. Length: {block_length}"
+                        ),
+                        file_cursor: reader.current_offset(),
+                        path: reader.path.to_owned(),
+                    });
                 }
 
-                vorbis_sections.push(VorbisComment::parse_block(vorbis_block, vorbis_ptr).await?);
+                vorbis_sections.push(
+                    VorbisComment::parse_block(vorbis_block, vorbis_ptr)
+                        .await
+                        .map_err(|mut err| {
+                            err.path = reader.path.to_owned();
+                            err
+                        })?,
+                );
             }
             VORBIS_COMMENT_MARKER::END_OF_BLOCK => {
                 let vorbis_ptr = reader.current_offset() as i64;
                 let vorbis_block = reader.get_bytes(block_length).await?;
 
                 if vorbis_block.len() < block_length {
-                    return Err(anyhow!(
-                        "Not enough bytes for vorbis block. Length: {block_length}"
-                    ));
+                    return Err(Corruption {
+                        message: format!(
+                            "Not enough bytes for vorbis block. Length: {block_length}"
+                        ),
+                        file_cursor: reader.current_offset(),
+                        path: reader.path.to_owned(),
+                    });
                 }
 
-                vorbis_sections.push(VorbisComment::parse_block(vorbis_block, vorbis_ptr).await?);
+                vorbis_sections.push(
+                    VorbisComment::parse_block(vorbis_block, vorbis_ptr)
+                        .await
+                        .map_err(|mut err| {
+                            err.path = reader.path.to_owned();
+                            err
+                        })?,
+                );
                 break;
             }
             PICTURE_MARKER::MARKER => {
@@ -117,7 +138,7 @@ pub async fn parse_flac(reader: &mut UringBufReader) -> anyhow::Result<AudioFile
         paddings,
     })
 }
-async fn parse_picture(reader: &mut UringBufReader) -> anyhow::Result<Picture> {
+async fn parse_picture(reader: &mut UringBufReader) -> Result<Picture, Corruption> {
     let file_ptr = reader.current_offset() as i64;
     let picture_type = reader.read_u32().await?;
 

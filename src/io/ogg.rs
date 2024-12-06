@@ -1,7 +1,9 @@
-use super::{checksum::crc32, reader::UringBufReader};
+use super::{
+    checksum::crc32,
+    reader::{Corruption, UringBufReader},
+};
 use crate::formats::opus_ogg::OGG_MARKER;
-use anyhow::anyhow;
-use std::{cmp::Ordering, io};
+use std::cmp::Ordering;
 
 pub struct OggPageReader<'a> {
     pub reader: &'a mut UringBufReader,
@@ -19,7 +21,7 @@ impl<'a> OggPageReader<'a> {
     }
     /// Creates a new OggPageReader and immediately parses first header
     /// returns Err if reader isn't positioned on header
-    pub async fn new(reader: &'a mut UringBufReader) -> anyhow::Result<Self> {
+    pub async fn new(reader: &'a mut UringBufReader) -> Result<Self, Corruption> {
         let mut ogg_reader = OggPageReader {
             reader,
             last_header_ptr: 0,
@@ -34,31 +36,38 @@ impl<'a> OggPageReader<'a> {
     }
     /// parses header and mutates self attributes
     /// returns Err if cursor isn't positioned on segment_size (end of segment)
-    pub async fn parse_header(&mut self) -> anyhow::Result<()> {
-        let path = self.reader.path.clone();
+    pub async fn parse_header(&mut self) -> Result<(), Corruption> {
         if self.segment_size != self.cursor {
-            return Err(anyhow!(
-                "Attempted to read header while cursor is in the middle of segment. file: {}",
-                path.to_str().unwrap()
-            ));
+            return Err(Corruption {
+                message: format!(
+                    "Attempted to read header while cursor is in the middle of the segment"
+                ),
+                path: self.reader.path.to_owned(),
+                file_cursor: self.reader.current_offset(),
+            });
         }
         self.last_header_ptr = (self.reader.file_ptr + self.reader.cursor) as usize;
-        let header_prefix = self.reader.get_bytes(27).await?;
+        let header_prefix = self.reader.get_bytes(27).await.map_err(|mut err| {
+            err.message = "Not enough bytes for minimal Ogg Header".to_owned();
+            err
+        })?;
+
         self.last_header.clear();
         self.last_header.extend(&header_prefix[0..22]);
         self.last_header.extend([0; 4]); // 0s out CRC
         self.last_header.push(header_prefix[26]);
-
-        assert_eq!(
-            header_prefix[0..4],
-            OGG_MARKER,
-            "OGG marker doesn't match. Possibly corrupted file: {}",
-            path.to_str().unwrap(),
-        );
+        if header_prefix[0..4] != OGG_MARKER {}
         let header: usize = header_prefix[5].into();
-        let page_number = u32::from_be_bytes(header_prefix[18..22].try_into()?);
+        let page_number = u32::from_be_bytes(header_prefix[18..22].try_into().unwrap());
         let segment_len: usize = header_prefix[26].into();
-        let segments = self.reader.get_bytes(segment_len).await?;
+        let segments = self
+            .reader
+            .get_bytes(segment_len)
+            .await
+            .map_err(|mut err| {
+                err.message = "Not enough bytes for header segments".to_owned();
+                err
+            })?;
         let segment_total = segments.iter().fold(0, |acc, x| acc + *x as usize);
         self.last_header.extend(segments);
         self.segment_size = segment_total;
@@ -69,7 +78,7 @@ impl<'a> OggPageReader<'a> {
     }
     /// Gets usize amount of bytes, automatically skipping headers.
     /// Ignores streams, can return bytes from different streams
-    pub async fn get_bytes(&mut self, size: usize) -> anyhow::Result<Vec<u8>> {
+    pub async fn get_bytes(&mut self, size: usize) -> Result<Vec<u8>, Corruption> {
         let mut result = Vec::with_capacity(size);
         let mut size_left = size;
         loop {
@@ -94,18 +103,19 @@ impl<'a> OggPageReader<'a> {
     /// cursor = segment_size => parses header
     /// cursor > segment_size => Err
     /// _ => Ok(())
-    async fn check_cursor(&mut self) -> anyhow::Result<()> {
+    async fn check_cursor(&mut self) -> Result<(), Corruption> {
         match self.cursor.cmp(&self.segment_size) {
             Ordering::Equal => self.parse_header().await,
-            Ordering::Greater => Err(anyhow!(
-                "Attempted to read bytes from header segment {}",
-                self.reader.path.to_str().unwrap(),
-            )),
+            Ordering::Greater => Err(Corruption {
+                message: "Attempted to read data from header bytes (mismatched pages)".to_owned(),
+                path: self.reader.path.to_owned(),
+                file_cursor: self.reader.current_offset(),
+            }),
             _ => Ok(()),
         }
     }
     /// parses current stream till end.
-    pub async fn parse_till_end(&mut self) -> anyhow::Result<Vec<u8>> {
+    pub async fn parse_till_end(&mut self) -> Result<Vec<u8>, Corruption> {
         self.check_cursor().await?;
         let mut result = Vec::with_capacity(self.page_left());
 
@@ -123,7 +133,7 @@ impl<'a> OggPageReader<'a> {
         self.segment_size - self.cursor
     }
 
-    pub async fn safe_skip(&mut self, size: usize) -> anyhow::Result<()> {
+    pub async fn safe_skip(&mut self, size: usize) -> Result<(), Corruption> {
         self.check_cursor().await?;
         let mut read = 0;
         while read < size - self.segment_size {
@@ -144,7 +154,7 @@ impl<'a> OggPageReader<'a> {
 }
 
 impl<'a> OggPageReader<'a> {
-    async fn write_last_crc(&mut self, segment_bytes: &[u8]) -> Result<(), io::Error> {
+    async fn write_last_crc(&mut self, segment_bytes: &[u8]) -> Result<(), Corruption> {
         let (res, _buf) = self
             .reader
             .file
@@ -153,10 +163,14 @@ impl<'a> OggPageReader<'a> {
                 self.last_header_ptr as u64 + 22, // crc offset
             )
             .await;
-        res
+        res.map_err(|err| Corruption {
+            path: self.reader.path.to_owned(),
+            file_cursor: self.last_header_ptr as u64 + 22,
+            message: format!("Failed to write CRC32. IO error: {err:?}"),
+        })
     }
     /// reads entire page (from last header) including header and recalculates its checksum
-    pub async fn recalculate_last_crc(&mut self) -> Result<(), io::Error> {
+    pub async fn recalculate_last_crc(&mut self) -> Result<(), Corruption> {
         let full_page_size = self.segment_size + self.last_header.len();
         let buf = Vec::with_capacity(full_page_size);
         let (res, mut buf) = self
@@ -164,7 +178,13 @@ impl<'a> OggPageReader<'a> {
             .file
             .read_exact_at(buf, self.last_header_ptr as u64)
             .await;
-        res?;
+        res.map_err(|err| {
+            Corruption::io(
+                self.reader.path.to_owned(),
+                self.last_header_ptr as u64,
+                err,
+            )
+        })?;
 
         // writes 0's at CRC offset
         unsafe {
@@ -178,7 +198,7 @@ impl<'a> OggPageReader<'a> {
 
     /// Writes buffer into segment part of stream at current cursor
     /// recalculates checksum
-    pub async fn write_stream(&mut self, buf: &[u8]) -> anyhow::Result<()> {
+    pub async fn write_stream(&mut self, buf: &[u8]) -> Result<(), Corruption> {
         self.check_cursor().await?;
 
         let remaining_in_segment = self.page_left();
@@ -215,7 +235,7 @@ impl<'a> OggPageReader<'a> {
     }
 
     /// Writes \0 bytes to segments until end of stream, starting from current cursor
-    pub async fn pad_till_end(&mut self) -> anyhow::Result<()> {
+    pub async fn pad_till_end(&mut self) -> Result<(), Corruption> {
         while !self.ends_stream {
             let remaining_segment = self.page_left();
             self.write_stream(&vec![0; remaining_segment]).await?;
@@ -223,7 +243,7 @@ impl<'a> OggPageReader<'a> {
         self.write_stream(&vec![0; self.page_left()]).await?;
         Ok(())
     }
-    pub async fn rehash_headers(&mut self) -> anyhow::Result<()> {
+    pub async fn rehash_headers(&mut self) -> Result<(), Corruption> {
         while !self.ends_stream {
             self.safe_skip(self.page_left()).await?;
             self.recalculate_last_crc().await?;

@@ -5,7 +5,10 @@ use crate::{
         picture::Picture,
         vorbis::{VorbisComment, VorbisMeta},
     },
-    io::{ogg::OggPageReader, reader::UringBufReader},
+    io::{
+        ogg::OggPageReader,
+        reader::{Corruption, UringBufReader},
+    },
 };
 use base64::{engine::general_purpose, Engine as _};
 use std::os::fd::AsRawFd;
@@ -27,7 +30,7 @@ const VORBIS_PICTURE_MARKER_UPPER: [u8; 22] = [
 
 async fn parse_opus_vorbis<'a>(
     ogg_reader: &mut OggPageReader<'a>,
-) -> anyhow::Result<AudioFileMeta> {
+) -> Result<AudioFileMeta, Corruption> {
     let mut comments = Vec::new();
     let mut pictures = Vec::new();
     let mut padding = Vec::new();
@@ -190,7 +193,7 @@ async fn parse_opus_vorbis<'a>(
 async fn parse_picture_meta<'a>(
     ogg_reader: &mut OggPageReader<'a>,
     file_ptr: i64,
-) -> anyhow::Result<(u32, Picture)> {
+) -> Result<(u32, Picture), Corruption> {
     let mut size_read = 0;
     let mut final_bytes = Vec::new();
     let to_base64_bytes = |bytes: usize| -> usize {
@@ -241,7 +244,7 @@ async fn parse_picture_meta<'a>(
     ))
 }
 
-pub async fn parse_ogg_pages(reader: &mut UringBufReader) -> anyhow::Result<AudioFileMeta> {
+pub async fn parse_ogg_pages(reader: &mut UringBufReader) -> Result<AudioFileMeta, Corruption> {
     reader.cursor -= 4; // Go back to OGGs
     let mut ogg_reader = OggPageReader::new(reader).await?;
 
@@ -252,22 +255,10 @@ pub async fn parse_ogg_pages(reader: &mut UringBufReader) -> anyhow::Result<Audi
         if ogg_reader.get_bytes(8).await? == OPUS_TAGS_MARKER {
             return parse_opus_vorbis(&mut ogg_reader).await;
         }
-        Ok(AudioFileMeta {
-            audio_file: AudioFile {
-                path: ogg_reader.reader.path.to_string_lossy().to_string(),
-                format: Some("opus".to_owned()),
-                name: ogg_reader
-                    .reader
-                    .path
-                    .file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .to_string(),
-                id: None,
-            },
-            paddings: vec![],
-            comments: vec![],
-            pictures: vec![],
+        Err(Corruption {
+            message: "OpusTags Marker not found".to_owned(),
+            file_cursor: ogg_reader.reader.current_offset() - 8,
+            path: ogg_reader.reader.path.to_owned(),
         })
     } else {
         // TODO
@@ -291,7 +282,7 @@ pub async fn parse_ogg_pages(reader: &mut UringBufReader) -> anyhow::Result<Audi
     }
 }
 
-pub async fn remove_comments(meta: AudioFileMeta, names: Vec<String>) -> anyhow::Result<()> {
+pub async fn remove_comments(meta: AudioFileMeta, names: Vec<String>) -> Result<(), Corruption> {
     let file = OpenOptions::new()
         .write(true)
         .read(true)
@@ -299,9 +290,9 @@ pub async fn remove_comments(meta: AudioFileMeta, names: Vec<String>) -> anyhow:
         .await
         .unwrap();
     let mut reader = UringBufReader::new(file, meta.audio_file.path.into());
-    let mut ogg_reader = OggPageReader::new(&mut reader).await.unwrap();
-    ogg_reader.parse_till_end().await.unwrap();
-    ogg_reader.parse_header().await.unwrap();
+    let mut ogg_reader = OggPageReader::new(&mut reader).await?;
+    ogg_reader.parse_till_end().await?;
+    ogg_reader.parse_header().await?;
     let (vorbis_meta, comments) = &meta.comments[0]; // oggs can contain only 1 meta field
     let mut comment_bytes = Vec::new();
     let mut _removed_comment_size = 0;
@@ -310,11 +301,7 @@ pub async fn remove_comments(meta: AudioFileMeta, names: Vec<String>) -> anyhow:
         if names.contains(&comment.key) {
             _removed_comment_size += comment.size;
         } else {
-            let comment = comment
-                .to_owned()
-                .into_bytes_ogg(&mut ogg_reader)
-                .await
-                .unwrap();
+            let comment = comment.to_owned().into_bytes_ogg(&mut ogg_reader).await?;
             kept_comments += 1;
             comment_bytes.extend(comment);
         }
@@ -329,16 +316,14 @@ pub async fn remove_comments(meta: AudioFileMeta, names: Vec<String>) -> anyhow:
     ogg_reader.safe_skip(12 + vorbis_meta.vendor.len()).await?;
     ogg_reader
         .write_stream(&kept_comments.to_le_bytes())
-        .await
-        .unwrap();
-    ogg_reader.write_stream(&comment_bytes).await.unwrap();
+        .await?;
+    ogg_reader.write_stream(&comment_bytes).await?;
     ogg_reader
         .reader
         .write_at_current_offset(vec![0; ogg_reader.segment_size - ogg_reader.cursor])
-        .await
-        .unwrap();
+        .await?;
 
-    ogg_reader.recalculate_last_crc().await.unwrap();
+    ogg_reader.recalculate_last_crc().await?;
 
     let mut offset = vorbis_meta.end_ptr;
 
@@ -350,24 +335,22 @@ pub async fn remove_comments(meta: AudioFileMeta, names: Vec<String>) -> anyhow:
         match res {
             Ok(bytes_read) if bytes_read < MAX_OGG_PAGE_SIZE as usize => {
                 buf.resize(bytes_read, 0);
-                ogg_reader
-                    .reader
-                    .write_at_current_offset(buf)
-                    .await
-                    .unwrap();
+                ogg_reader.reader.write_at_current_offset(buf).await?;
                 total_size += bytes_read as u64;
                 break;
             }
             Ok(bytes_read) => {
-                ogg_reader
-                    .reader
-                    .write_at_current_offset(buf)
-                    .await
-                    .unwrap();
+                ogg_reader.reader.write_at_current_offset(buf).await?;
                 offset += bytes_read as i64;
                 total_size += bytes_read as u64;
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => {
+                return Err(Corruption::io(
+                    ogg_reader.reader.path.to_owned(),
+                    ogg_reader.reader.current_offset(),
+                    e,
+                ))
+            }
         }
     }
 

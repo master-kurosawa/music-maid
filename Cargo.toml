@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-anyhow = "1.0.90"
 base64 = "0.21"
 futures = "0.3.31"
 ignore = "0.4"

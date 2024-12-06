@@ -1,6 +1,8 @@
+use std::path::PathBuf;
+
 use sqlx::{prelude::FromRow, Executor, Sqlite};
 
-use crate::io::ogg::OggPageReader;
+use crate::io::{ogg::OggPageReader, reader::Corruption};
 
 pub const FLAC_MARKER: [u8; 4] = [0x66, 0x4C, 0x61, 0x43];
 /// #TODO incomplete list
@@ -47,7 +49,7 @@ impl VorbisComment {
     pub async fn into_bytes_ogg<'a>(
         self,
         reader: &mut OggPageReader<'a>,
-    ) -> anyhow::Result<Vec<u8>> {
+    ) -> Result<Vec<u8>, Corruption> {
         if let Some(val) = self.value {
             let mut comment = Vec::with_capacity(self.size as usize);
             comment.extend((self.size as u32 - 4).to_le_bytes());
@@ -155,20 +157,37 @@ impl VorbisComment {
     pub async fn parse_block(
         vorbis_block: &[u8],
         block_ptr: i64,
-    ) -> anyhow::Result<(VorbisMeta, Vec<Self>)> {
+    ) -> Result<(VorbisMeta, Vec<Self>), Corruption> {
         let mut comments = Vec::new();
         let block_length = vorbis_block.len();
 
-        let vendor_len = u32::from_le_bytes(vorbis_block[0..4].try_into()?) as usize;
+        let vendor_len =
+            u32::from_le_bytes(vorbis_block[0..4].try_into().map_err(|_| Corruption {
+                path: "".into(),
+                file_cursor: block_ptr as u64,
+                message: "Corrupted VorbisBlock".to_owned(),
+            })?) as usize;
         let vendor = String::from_utf8_lossy(&vorbis_block[4..vendor_len + 4]).to_string();
         let mut comment_cursor = vendor_len + 4;
         let comment_amount_ptr = comment_cursor as i64 + block_ptr;
-        let comment_amount: usize =
-            u32::from_le_bytes(vorbis_block[comment_cursor..comment_cursor + 4].try_into()?)
-                as usize;
-        let mut comment_len =
-            u32::from_le_bytes(vorbis_block[comment_cursor + 4..comment_cursor + 8].try_into()?)
-                as usize;
+        let comment_amount: usize = u32::from_le_bytes(
+            vorbis_block[comment_cursor..comment_cursor + 4]
+                .try_into()
+                .map_err(|_| Corruption {
+                    path: "".into(),
+                    file_cursor: block_ptr as u64,
+                    message: "Corrupted VorbisBlock".to_owned(),
+                })?,
+        ) as usize;
+        let mut comment_len = u32::from_le_bytes(
+            vorbis_block[comment_cursor + 4..comment_cursor + 8]
+                .try_into()
+                .map_err(|_| Corruption {
+                    path: "".into(),
+                    file_cursor: block_ptr as u64,
+                    message: "Corrupted VorbisBlock".to_owned(),
+                })?,
+        ) as usize;
 
         comment_cursor += 8;
         while comment_cursor + comment_len <= block_length {
@@ -198,9 +217,15 @@ impl VorbisComment {
             if comment_cursor >= block_length {
                 break;
             }
-            comment_len =
-                u32::from_le_bytes(vorbis_block[comment_cursor - 4..comment_cursor].try_into()?)
-                    as usize;
+            comment_len = u32::from_le_bytes(
+                vorbis_block[comment_cursor - 4..comment_cursor]
+                    .try_into()
+                    .map_err(|_| Corruption {
+                        path: "".into(),
+                        file_cursor: block_ptr as u64,
+                        message: "Corrupted VorbisBlock".to_owned(),
+                    })?,
+            ) as usize;
         }
 
         assert_eq!(comments.len(), comment_amount);
