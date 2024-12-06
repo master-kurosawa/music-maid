@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use sqlx::{prelude::FromRow, Executor, Sqlite};
 
 use crate::io::{ogg::OggPageReader, reader::Corruption};
