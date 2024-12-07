@@ -36,6 +36,7 @@ pub async fn parse_flac(reader: &mut UringBufReader) -> Result<AudioFileMeta, Co
         name: reader
             .path
             .file_name()
+            .to_owned()
             .unwrap()
             .to_string_lossy()
             .to_string(),
@@ -144,11 +145,11 @@ async fn parse_picture(reader: &mut UringBufReader) -> Result<Picture, Corruptio
 
     let mime_len = reader.read_u32().await? as usize;
     let mime_bytes = reader.get_bytes(mime_len).await?;
-    let mime = String::from_utf8_lossy_owned(mime_bytes);
+    let mime = String::from_utf8_lossy(mime_bytes).to_string();
 
     let description_len = reader.read_u32().await? as usize;
     let description_bytes = reader.get_bytes(description_len).await?;
-    let description = String::from_utf8_lossy_owned(description_bytes);
+    let description = String::from_utf8_lossy(description_bytes).to_string();
 
     let width = reader.read_u32().await?;
     let height = reader.read_u32().await?;

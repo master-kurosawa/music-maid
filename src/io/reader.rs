@@ -159,7 +159,7 @@ impl UringBufReader {
     /// gets usize bytes from the current buffer, extending it if needed
     /// extends by missing amount + additional 8196 bytes
     /// returns rest of the buffer if it reaches EOF
-    pub async fn get_bytes(&mut self, amount: usize) -> Result<Vec<u8>, Corruption> {
+    pub async fn get_bytes(&mut self, amount: usize) -> Result<&[u8], Corruption> {
         let buf_len = self.buf.len();
         if buf_len <= amount + self.cursor as usize {
             self.extend_buf(amount + self.cursor as usize - buf_len + BASE_SIZE)
@@ -172,10 +172,11 @@ impl UringBufReader {
                 });
             }
         }
-        let slice: Vec<u8> = self
+        let slice = self
             .buf
-            .drain(self.cursor as usize..self.cursor as usize + amount)
-            .collect();
+            .get(self.cursor as usize..self.cursor as usize + amount)
+            .unwrap();
+        self.cursor += amount as u64;
         Ok(slice)
     }
 

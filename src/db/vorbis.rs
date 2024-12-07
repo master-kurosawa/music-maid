@@ -3,24 +3,6 @@ use sqlx::{prelude::FromRow, Executor, Sqlite};
 use crate::io::{ogg::OggPageReader, reader::Corruption};
 
 pub const FLAC_MARKER: [u8; 4] = [0x66, 0x4C, 0x61, 0x43];
-/// #TODO incomplete list
-pub const VORBIS_FIELDS_LOWER: [&str; 15] = [
-    "title",
-    "version",
-    "album",
-    "tracknumber",
-    "artist",
-    "performer",
-    "copyright",
-    "license",
-    "organization",
-    "description",
-    "genre",
-    "date",
-    "location",
-    "contact",
-    "isrc",
-];
 
 #[derive(Debug, Clone, FromRow)]
 pub struct VorbisMeta {
@@ -153,7 +135,7 @@ impl VorbisComment {
     }
 
     pub async fn parse_block(
-        vorbis_block: Vec<u8>,
+        vorbis_block: &[u8],
         block_ptr: i64,
     ) -> Result<(VorbisMeta, Vec<Self>), Corruption> {
         let mut comments = Vec::new();
