@@ -1,3 +1,4 @@
+#![feature(string_from_utf8_lossy_owned)]
 pub mod db;
 mod formats;
 mod io;
@@ -54,9 +55,9 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         return Ok(());
     }
 
-    let paths = walk_dir("./broken/");
+    let paths = walk_dir("./tmp");
     let conf = ThrottleConfig::new(8);
-    tokio_uring::builder()
+    let _ = tokio_uring::builder()
         .entries(1024)
         .start(async { load_data_from_paths(paths, conf).await });
 

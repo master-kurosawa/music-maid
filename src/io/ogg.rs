@@ -3,7 +3,7 @@ use super::{
     reader::{Corruption, UringBufReader},
 };
 use crate::formats::opus_ogg::OGG_MARKER;
-use std::cmp::Ordering;
+use std::{cmp::Ordering, mem};
 
 pub struct OggPageReader<'a> {
     pub reader: &'a mut UringBufReader,
@@ -39,9 +39,8 @@ impl<'a> OggPageReader<'a> {
     pub async fn parse_header(&mut self) -> Result<(), Corruption> {
         if self.segment_size != self.cursor {
             return Err(Corruption {
-                message: format!(
-                    "Attempted to read header while cursor is in the middle of the segment"
-                ),
+                message: "Attempted to read header while cursor is in the middle of the segment"
+                    .to_owned(),
                 path: self.reader.path.to_owned(),
                 file_cursor: self.reader.current_offset(),
             });
@@ -56,7 +55,13 @@ impl<'a> OggPageReader<'a> {
         self.last_header.extend(&header_prefix[0..22]);
         self.last_header.extend([0; 4]); // 0s out CRC
         self.last_header.push(header_prefix[26]);
-        if header_prefix[0..4] != OGG_MARKER {}
+        if header_prefix[0..4] != OGG_MARKER {
+            return Err(Corruption {
+                message: "OGG Marker was not found in the expected location.".to_owned(),
+                path: self.reader.path.to_owned(),
+                file_cursor: self.reader.current_offset(),
+            });
+        }
         let header: usize = header_prefix[5].into();
         let page_number = u32::from_be_bytes(header_prefix[18..22].try_into().unwrap());
         let segment_len: usize = header_prefix[26].into();
@@ -128,7 +133,7 @@ impl<'a> OggPageReader<'a> {
         Ok(result)
     }
 
-    #[inline]
+    #[inline(always)]
     pub const fn page_left(&self) -> usize {
         self.segment_size - self.cursor
     }
@@ -216,8 +221,7 @@ impl<'a> OggPageReader<'a> {
 
         if self.cursor == self.segment_size {
             if chunk_len == self.segment_size {
-                let mut header = self.last_header.clone();
-                self.last_header.clear();
+                let mut header = mem::take(&mut self.last_header);
                 header.extend(current_chunk);
                 self.write_last_crc(&header).await?;
                 drop(header);

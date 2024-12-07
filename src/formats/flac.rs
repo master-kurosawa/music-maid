@@ -50,7 +50,7 @@ pub async fn parse_flac(reader: &mut UringBufReader) -> Result<AudioFileMeta, Co
 
         match header[0] {
             VORBIS_COMMENT_MARKER::MARKER => {
-                let vorbis_ptr = (reader.file_ptr + reader.cursor) as i64;
+                let vorbis_ptr = reader.current_offset() as i64;
                 let vorbis_block = reader.get_bytes(block_length).await?;
                 if vorbis_block.len() < block_length {
                     return Err(Corruption {
@@ -144,11 +144,11 @@ async fn parse_picture(reader: &mut UringBufReader) -> Result<Picture, Corruptio
 
     let mime_len = reader.read_u32().await? as usize;
     let mime_bytes = reader.get_bytes(mime_len).await?;
-    let mime = String::from_utf8_lossy(mime_bytes).to_string();
+    let mime = String::from_utf8_lossy_owned(mime_bytes);
 
     let description_len = reader.read_u32().await? as usize;
     let description_bytes = reader.get_bytes(description_len).await?;
-    let description = String::from_utf8_lossy(description_bytes).to_string();
+    let description = String::from_utf8_lossy_owned(description_bytes);
 
     let width = reader.read_u32().await?;
     let height = reader.read_u32().await?;

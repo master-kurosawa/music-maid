@@ -1,10 +1,9 @@
+use crate::db::{audio_file::AudioFileMeta, vorbis::VorbisComment};
+use futures::channel::{mpsc, mpsc::Sender};
 use futures::{SinkExt, StreamExt};
 use sqlx::{Pool, Sqlite, SqlitePool};
+use std::mem;
 use tokio::task::JoinHandle;
-
-use futures::channel::{mpsc, mpsc::Sender};
-
-use crate::db::{audio_file::AudioFileMeta, vorbis::VorbisComment};
 
 const QUEUE_LIMIT: usize = 25;
 
@@ -14,64 +13,64 @@ pub struct TaskQueue {
     executor: JoinHandle<()>,
     sender: Sender<Option<Vec<AudioFileMeta>>>,
 }
-impl Default for TaskQueue {
-    fn default() -> Self {
-        TaskQueue::new()
-    }
-}
+
 impl TaskQueue {
-    pub fn new() -> Self {
+    pub async fn new() -> Result<Self, sqlx::Error> {
         let (sender, mut receiver) = mpsc::channel::<Option<Vec<AudioFileMeta>>>(100);
+        let pool = SqlitePool::connect("sqlite://dev.db").await?;
         let executor = tokio::spawn(async move {
-            let pool = SqlitePool::connect("sqlite://dev.db").await.unwrap();
             while let Some(queue) = receiver.next().await {
                 match queue {
-                    Some(queue) => TaskQueue::insert(queue, &pool).await,
+                    Some(queue) => {
+                        if let Err(e) = TaskQueue::insert(queue, &pool).await {
+                            // Log errors somwhere here
+                            println!("Temporary log: {e:?}");
+                        }
+                    }
                     None => break,
                 }
             }
         });
-        TaskQueue {
+        Ok(TaskQueue {
             queue: Vec::with_capacity(QUEUE_LIMIT),
             executor,
             sender,
-        }
+        })
     }
+
     pub async fn finish(self) {
-        let _ = self.sender.to_owned().send(Some(self.queue.clone())).await;
-        let _ = self.sender.to_owned().send(None).await;
-        self.queue.to_owned().clear();
-        self.queue.to_owned().shrink_to_fit();
+        let mut sender = self.sender;
+        if !self.queue.is_empty() {
+            let _ = sender.send(Some(self.queue)).await;
+        }
+        let _ = sender.send(None).await;
         let _ = self.executor.await;
     }
-    pub async fn insert(queue: Vec<AudioFileMeta>, pool: &Pool<Sqlite>) {
-        let mut transaction = pool.begin().await.unwrap();
+    pub async fn insert(queue: Vec<AudioFileMeta>, pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
+        let mut transaction = pool.begin().await?;
         for item in queue {
-            let file_id = item.audio_file.insert(&mut *transaction).await.unwrap();
+            let file_id = item.audio_file.insert(&mut *transaction).await?;
             for (mut vorbis_meta, vorbis) in item.comments {
                 vorbis_meta.file_id = Some(file_id);
-                let meta_id = vorbis_meta.insert(&mut *transaction).await.unwrap();
+                let meta_id = vorbis_meta.insert(&mut *transaction).await?;
                 if vorbis.is_empty() {
                     continue;
                 }
-                VorbisComment::insert_many(meta_id, vorbis, &mut *transaction)
-                    .await
-                    .unwrap();
+                VorbisComment::insert_many(meta_id, vorbis, &mut *transaction).await?;
             }
             for picture in item.pictures {
-                picture.insert(file_id, &mut *transaction).await.unwrap();
+                picture.insert(file_id, &mut *transaction).await?;
             }
             for padding in item.paddings {
-                padding.insert(file_id, &mut *transaction).await.unwrap();
+                padding.insert(file_id, &mut *transaction).await?;
             }
         }
-        transaction.commit().await.unwrap();
+        transaction.commit().await
     }
     pub async fn push(&mut self, item: AudioFileMeta) {
         self.queue.push(item);
         if self.queue.len() >= QUEUE_LIMIT {
-            let _ = self.sender.send(Some(self.queue.clone())).await;
-            self.queue.clear();
+            let _ = self.sender.send(Some(mem::take(&mut self.queue))).await;
         }
     }
 }

@@ -171,6 +171,7 @@ async fn parse_opus_vorbis<'a>(
         id: None,
         file_id: None,
     };
+
     Ok(AudioFileMeta {
         audio_file: AudioFile {
             id: None,
@@ -282,26 +283,32 @@ pub async fn parse_ogg_pages(reader: &mut UringBufReader) -> Result<AudioFileMet
     }
 }
 
-pub async fn remove_comments(meta: AudioFileMeta, names: Vec<String>) -> Result<(), Corruption> {
+pub async fn remove_comments(
+    mut meta: AudioFileMeta,
+    names: Vec<String>,
+) -> Result<(), Corruption> {
+    if meta.comments.is_empty() {
+        return Ok(());
+    }
     let file = OpenOptions::new()
         .write(true)
         .read(true)
-        .open(meta.audio_file.path.clone())
+        .open(meta.audio_file.path.to_owned())
         .await
-        .unwrap();
+        .map_err(|err| Corruption::io(meta.audio_file.path.clone().into(), 0, err))?;
     let mut reader = UringBufReader::new(file, meta.audio_file.path.into());
     let mut ogg_reader = OggPageReader::new(&mut reader).await?;
     ogg_reader.parse_till_end().await?;
     ogg_reader.parse_header().await?;
-    let (vorbis_meta, comments) = &meta.comments[0]; // oggs can contain only 1 meta field
+    let (vorbis_meta, mut comments) = meta.comments.pop().unwrap(); // oggs can contain only 1 meta field
     let mut comment_bytes = Vec::new();
     let mut _removed_comment_size = 0;
     let mut kept_comments: u32 = 0;
-    for comment in comments.iter() {
+    for comment in comments.drain(..) {
         if names.contains(&comment.key) {
             _removed_comment_size += comment.size;
         } else {
-            let comment = comment.to_owned().into_bytes_ogg(&mut ogg_reader).await?;
+            let comment = comment.into_bytes_ogg(&mut ogg_reader).await?;
             kept_comments += 1;
             comment_bytes.extend(comment);
         }
@@ -327,7 +334,7 @@ pub async fn remove_comments(meta: AudioFileMeta, names: Vec<String>) -> Result<
 
     let mut offset = vorbis_meta.end_ptr;
 
-    let mut total_size = ogg_reader.reader.file_ptr + ogg_reader.reader.cursor;
+    let mut total_size = ogg_reader.reader.current_offset();
 
     loop {
         let buf = vec![0; MAX_OGG_PAGE_SIZE as usize];

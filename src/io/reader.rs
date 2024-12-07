@@ -68,7 +68,7 @@ impl UringBufReader {
 }
 
 impl UringBufReader {
-    #[inline]
+    #[inline(always)]
     pub const fn current_offset(&self) -> u64 {
         self.file_ptr + self.cursor
     }
@@ -159,7 +159,7 @@ impl UringBufReader {
     /// gets usize bytes from the current buffer, extending it if needed
     /// extends by missing amount + additional 8196 bytes
     /// returns rest of the buffer if it reaches EOF
-    pub async fn get_bytes(&mut self, amount: usize) -> Result<&[u8], Corruption> {
+    pub async fn get_bytes(&mut self, amount: usize) -> Result<Vec<u8>, Corruption> {
         let buf_len = self.buf.len();
         if buf_len <= amount + self.cursor as usize {
             self.extend_buf(amount + self.cursor as usize - buf_len + BASE_SIZE)
@@ -172,11 +172,10 @@ impl UringBufReader {
                 });
             }
         }
-        let slice = self
+        let slice: Vec<u8> = self
             .buf
-            .get(self.cursor as usize..self.cursor as usize + amount)
-            .unwrap();
-        self.cursor += amount as u64;
+            .drain(self.cursor as usize..self.cursor as usize + amount)
+            .collect();
         Ok(slice)
     }
 
@@ -247,10 +246,13 @@ pub fn walk_dir(path: &str) -> Vec<PathBuf> {
 }
 
 /// requires io_uring runtime
-pub async fn load_data_from_paths(paths: Vec<PathBuf>, config: ThrottleConfig) {
+pub async fn load_data_from_paths(
+    paths: Vec<PathBuf>,
+    config: ThrottleConfig,
+) -> Result<(), sqlx::Error> {
     let mut tasks = Vec::new();
     let semaphore = Arc::new(Semaphore::new(config.max_concurrent_tasks));
-    let queue = Arc::new(tokio::sync::Mutex::new(TaskQueue::new()));
+    let queue = Arc::new(tokio::sync::Mutex::new(TaskQueue::new().await?));
     for path in paths {
         let semaphore = Arc::clone(&semaphore);
         let queue = Arc::clone(&queue);
@@ -261,6 +263,7 @@ pub async fn load_data_from_paths(paths: Vec<PathBuf>, config: ThrottleConfig) {
         });
         tasks.push(spawn);
     }
+
     for task in tasks {
         let t = task.await.unwrap();
         if let Err(t) = t {
@@ -269,6 +272,7 @@ pub async fn load_data_from_paths(paths: Vec<PathBuf>, config: ThrottleConfig) {
     }
     let q = Arc::try_unwrap(queue).unwrap().into_inner();
     TaskQueue::finish(q).await;
+    Ok(())
 }
 
 async fn read_with_uring(

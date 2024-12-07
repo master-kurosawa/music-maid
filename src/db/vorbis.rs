@@ -153,7 +153,7 @@ impl VorbisComment {
     }
 
     pub async fn parse_block(
-        vorbis_block: &[u8],
+        vorbis_block: Vec<u8>,
         block_ptr: i64,
     ) -> Result<(VorbisMeta, Vec<Self>), Corruption> {
         let mut comments = Vec::new();
@@ -226,7 +226,13 @@ impl VorbisComment {
             ) as usize;
         }
 
-        assert_eq!(comments.len(), comment_amount);
+        if comments.len() != comment_amount {
+            return Err(Corruption {
+                file_cursor: block_ptr as u64,
+                path: "".into(),
+                message: "Comment amount does not match vorbis comment list length".to_owned(),
+            });
+        }
         let vorbis_meta = VorbisMeta {
             id: None,
             file_ptr: block_ptr,
