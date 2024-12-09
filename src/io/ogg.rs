@@ -2,7 +2,7 @@ use super::{
     checksum::crc32,
     reader::{Corruption, UringBufReader},
 };
-use crate::formats::opus_ogg::OGG_MARKER;
+use crate::formats::opus_ogg::{MAX_OGG_PAGE_SIZE, OGG_MARKER};
 use std::{cmp::Ordering, mem};
 
 pub struct OggPageReader<'a> {
@@ -13,6 +13,7 @@ pub struct OggPageReader<'a> {
     pub last_header_ptr: usize,
     pub page_number: u32,
     last_header: Vec<u8>,
+    serial: Option<[u8; 4]>,
 }
 
 impl<'a> OggPageReader<'a> {
@@ -30,6 +31,7 @@ impl<'a> OggPageReader<'a> {
             ends_stream: true,
             page_number: 0,
             cursor: 0,
+            serial: None,
         };
         ogg_reader.parse_header().await?;
         Ok(ogg_reader)
@@ -50,6 +52,19 @@ impl<'a> OggPageReader<'a> {
             err.message = "Not enough bytes for minimal Ogg Header".to_owned();
             err
         })?;
+        let serial = header_prefix[14..18].try_into().unwrap();
+
+        if let Some(existing_serial) = self.serial {
+            if serial != existing_serial {
+                return Err(Corruption {
+                    path: self.reader.path.to_owned(),
+                    message: "Ogg Bitstream Serial Number mismatch".to_owned(),
+                    file_cursor: self.reader.current_offset(),
+                });
+            }
+        } else {
+            self.serial = Some(serial);
+        }
 
         self.last_header.clear();
         self.last_header.extend(&header_prefix[0..22]);
@@ -159,6 +174,41 @@ impl<'a> OggPageReader<'a> {
 }
 
 impl<'a> OggPageReader<'a> {
+    async fn _write_tag_header(
+        &mut self,
+        page_size: u32,
+        page_number: u32,
+    ) -> Result<(), Corruption> {
+        const PREAMBULE: [u8; 14] = [
+            0x4F, 0x67, 0x67, 0x53, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        ];
+        assert!(page_size <= MAX_OGG_PAGE_SIZE);
+        if let Some(serial) = self.serial {
+            let mut header = Vec::with_capacity(64);
+            header.extend(PREAMBULE);
+            header.extend(serial);
+            header.extend(page_number.to_be_bytes());
+            header.extend([0; 4]); // Empty CRC32
+            let segment_amount: u8 = page_size.div_ceil(255).try_into().unwrap();
+            header.push(segment_amount);
+            let filled_segments = page_size as usize / 255;
+            header.extend(vec![255u8; filled_segments]);
+            if filled_segments < segment_amount as usize {
+                header.push((page_size % 255) as u8);
+            }
+            Ok(())
+        } else {
+            Err(Corruption {
+                file_cursor: 0,
+                message: "Ogg serial not established yet".to_owned(),
+                path: self.reader.path.to_owned(),
+            })
+        }
+    }
+    async fn write_tag_header(&mut self, page_size: u32) -> Result<(), Corruption> {
+        self._write_tag_header(page_size, self.page_number).await?;
+        Ok(())
+    }
     async fn write_last_crc(&mut self, segment_bytes: &[u8]) -> Result<(), Corruption> {
         let (res, _buf) = self
             .reader

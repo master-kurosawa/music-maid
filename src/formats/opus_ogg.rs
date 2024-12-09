@@ -15,7 +15,7 @@ use std::os::fd::AsRawFd;
 use tokio_uring::fs::OpenOptions;
 
 pub const OGG_MARKER: [u8; 4] = [0x4F, 0x67, 0x67, 0x53];
-const MAX_OGG_PAGE_SIZE: u32 = 65_307;
+pub const MAX_OGG_PAGE_SIZE: u32 = 65_025;
 const VORBIS_SIZE_LIMIT: u32 = MAX_OGG_PAGE_SIZE; // skips values of any comments > this size
 const OPUS_MARKER: [u8; 8] = [0x4F, 0x70, 0x75, 0x73, 0x48, 0x65, 0x61, 0x64];
 const OPUS_TAGS_MARKER: [u8; 8] = [0x4F, 0x70, 0x75, 0x73, 0x54, 0x61, 0x67, 0x73];
