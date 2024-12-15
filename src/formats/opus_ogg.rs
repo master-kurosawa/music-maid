@@ -6,7 +6,7 @@ use crate::{
         vorbis::{VorbisBlob, VorbisComment, VorbisMeta},
     },
     io::{
-        ogg::OggPageReader,
+        ogg::{self, OggPageReader},
         reader::{Corruption, UringBufReader},
     },
 };
@@ -34,6 +34,7 @@ async fn parse_opus_vorbis<'a>(
     let mut comments = Vec::new();
     let mut pictures = Vec::new();
     let mut padding = Vec::new();
+    let mut blobs = Vec::new();
 
     let vorbis_ptr = ogg_reader.reader.current_offset() as i64;
 
@@ -73,6 +74,37 @@ async fn parse_opus_vorbis<'a>(
                     comment_key.push(k);
                 }
 
+                let hash = if comment_key == VORBIS_PICTURE_MARKER
+                    || comment_key == VORBIS_PICTURE_MARKER_UPPER
+                {
+                    let ogg_cursor = ogg_reader.cursor;
+                    let cursor = ogg_reader.reader.cursor;
+                    let file_ptr = ogg_reader.reader.file_ptr;
+                    let (skipped, picture) =
+                        parse_picture_meta(ogg_reader, comment_ptr as i64).await?;
+                    ogg_reader.reader.cursor = cursor;
+                    ogg_reader.reader.file_ptr = file_ptr;
+                    ogg_reader.cursor = ogg_cursor;
+                    let size = comment_len as usize - skipped as usize;
+                    ogg_reader.reader.extend_buf(size).await?;
+                    let blob = VorbisBlob::new(
+                        general_purpose::STANDARD
+                            .decode(ogg_reader.get_bytes(size).await?)
+                            .unwrap(),
+                    );
+
+                    let hash = blob.hash.to_string();
+                    blobs.push(blob);
+                    pictures.push(picture);
+                    hash
+                } else {
+                    let size = comment_len as usize - comment_key.len() - 1;
+                    ogg_reader.reader.extend_buf(size).await?;
+                    let blob = VorbisBlob::new(ogg_reader.get_bytes(size).await?);
+                    let hash = blob.hash.to_string();
+                    blobs.push(blob);
+                    hash
+                };
                 let comment = VorbisComment {
                     id: None,
                     meta_id: None,
@@ -81,27 +113,8 @@ async fn parse_opus_vorbis<'a>(
                     last_ogg_header_ptr: Some(ogg_reader.last_header_ptr as i64),
                     value: None,
                     file_ptr: comment_ptr as i64,
-                    blob_hash: None,
+                    blob_hash: Some(hash),
                 };
-
-                let skipped = if comment_key == VORBIS_PICTURE_MARKER
-                    || comment_key == VORBIS_PICTURE_MARKER_UPPER
-                {
-                    let (skipped, picture) =
-                        parse_picture_meta(ogg_reader, comment_ptr as i64).await?;
-
-                    let blob = VorbisBlob::with_path(picture, None).await;
-
-                    pictures.push(picture);
-                    skipped
-                } else {
-                    0
-                };
-
-                ogg_reader.reader.extend_buf(comment_len as usize).await?;
-                ogg_reader
-                    .safe_skip(comment_len as usize - comment_key.len() - skipped as usize - 1)
-                    .await?;
                 comments.push(comment);
             } else {
                 let comment = ogg_reader.get_bytes(comment_len as usize).await?;
@@ -190,6 +203,7 @@ async fn parse_opus_vorbis<'a>(
                 .to_string(),
             format: Some("opus".to_owned()),
         },
+        blobs,
         pictures,
         comments: vec![(meta, comments)],
         paddings: padding,
@@ -281,6 +295,7 @@ pub async fn parse_ogg_pages(reader: &mut UringBufReader) -> Result<AudioFileMet
                     .to_string(),
                 id: None,
             },
+            blobs: vec![],
             paddings: vec![],
             comments: vec![],
             pictures: vec![],

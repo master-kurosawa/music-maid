@@ -44,6 +44,7 @@ pub async fn parse_flac(reader: &mut UringBufReader) -> Result<AudioFileMeta, Co
     };
     let mut vorbis_sections = Vec::new();
     let mut pictures = Vec::new();
+    let mut blobs = Vec::new();
     let mut paddings = Vec::new();
     loop {
         let header = reader.get_bytes(4).await?;
@@ -137,6 +138,7 @@ pub async fn parse_flac(reader: &mut UringBufReader) -> Result<AudioFileMeta, Co
         comments: vorbis_sections,
         pictures,
         paddings,
+        blobs,
     })
 }
 async fn parse_picture(reader: &mut UringBufReader) -> Result<Picture, Corruption> {

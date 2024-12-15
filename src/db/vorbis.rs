@@ -43,6 +43,17 @@ impl VorbisBlob {
             hash,
         }
     }
+    pub async fn hash_exists<'a, E>(hash: String, pool: E) -> Result<bool, sqlx::Error>
+    where
+        E: Executor<'a, Database = Sqlite>,
+    {
+        Ok(
+            sqlx::query!("SELECT hash FROM vorbis_blobs WHERE hash = ?", hash)
+                .fetch_optional(pool)
+                .await?
+                .is_some(),
+        )
+    }
     pub async fn with_path(data: Vec<u8>, ext: Option<String>) -> Result<Self, std::io::Error> {
         let hash = blake3::hash(&data).to_string();
         let file_path = format!("comments/{hash}.{}", ext.unwrap_or("".to_owned()));

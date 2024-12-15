@@ -1,3 +1,4 @@
+use crate::db::vorbis::VorbisBlob;
 use crate::db::{audio_file::AudioFileMeta, vorbis::VorbisComment};
 use futures::channel::{mpsc, mpsc::Sender};
 use futures::{SinkExt, StreamExt};
@@ -50,6 +51,12 @@ impl TaskQueue {
         let mut transaction = pool.begin().await?;
         for item in queue {
             let file_id = item.audio_file.insert(&mut *transaction).await?;
+            for blob in item.blobs {
+                if VorbisBlob::hash_exists(blob.hash.clone(), &mut *transaction).await? {
+                    continue;
+                }
+                blob.insert(&mut *transaction).await?;
+            }
             for (mut vorbis_meta, vorbis) in item.comments {
                 vorbis_meta.file_id = Some(file_id);
                 let meta_id = vorbis_meta.insert(&mut *transaction).await?;

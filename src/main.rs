@@ -56,7 +56,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     }
 
     let paths = walk_dir("./tmp");
-    let conf = ThrottleConfig::new(8);
+    let conf = ThrottleConfig::new(1024);
     let _ = tokio_uring::builder()
         .entries(1024)
         .start(async { load_data_from_paths(paths, conf).await });
