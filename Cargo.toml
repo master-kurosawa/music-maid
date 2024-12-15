@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 base64 = "0.21"
+blake3 = "1.5.5"
 futures = "0.3.31"
 ignore = "0.4"
 libc = "0.2.162"

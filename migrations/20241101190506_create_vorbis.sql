@@ -6,7 +6,9 @@ CREATE TABLE IF NOT EXISTS vorbis_comments (
     last_ogg_header_ptr INTEGER,
     size INTEGER NOT NULL,
     value TEXT,
-    FOREIGN KEY (meta_id) REFERENCES vorbis_meta(id)
+    blob_hash VARCHAR(32),
+    FOREIGN KEY (meta_id) REFERENCES vorbis_meta(id),
+    FOREIGN KEY (blob_hash) REFERENCES vorbis_blobs(hash)
 );
 
 CREATE TABLE IF NOT EXISTS vorbis_meta (
@@ -19,3 +21,8 @@ CREATE TABLE IF NOT EXISTS vorbis_meta (
     FOREIGN KEY (file_id) REFERENCES files(id)
 );
 
+CREATE TABLE IF NOT EXISTS vorbis_blobs (
+  hash VARCHAR(32) PRIMARY KEY,
+  value BLOB,
+  file_path TEXT
+);

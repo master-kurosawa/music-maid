@@ -3,7 +3,7 @@ use crate::{
         audio_file::{AudioFile, AudioFileMeta},
         padding::Padding,
         picture::Picture,
-        vorbis::{VorbisComment, VorbisMeta},
+        vorbis::{VorbisBlob, VorbisComment, VorbisMeta},
     },
     io::{
         ogg::OggPageReader,
@@ -73,7 +73,7 @@ async fn parse_opus_vorbis<'a>(
                     comment_key.push(k);
                 }
 
-                comments.push(VorbisComment {
+                let comment = VorbisComment {
                     id: None,
                     meta_id: None,
                     key: String::from_utf8_lossy(&comment_key).to_string(),
@@ -81,13 +81,16 @@ async fn parse_opus_vorbis<'a>(
                     last_ogg_header_ptr: Some(ogg_reader.last_header_ptr as i64),
                     value: None,
                     file_ptr: comment_ptr as i64,
-                });
+                    blob_hash: None,
+                };
 
                 let skipped = if comment_key == VORBIS_PICTURE_MARKER
                     || comment_key == VORBIS_PICTURE_MARKER_UPPER
                 {
                     let (skipped, picture) =
                         parse_picture_meta(ogg_reader, comment_ptr as i64).await?;
+
+                    let blob = VorbisBlob::with_path(picture, None).await;
 
                     pictures.push(picture);
                     skipped
@@ -99,6 +102,7 @@ async fn parse_opus_vorbis<'a>(
                 ogg_reader
                     .safe_skip(comment_len as usize - comment_key.len() - skipped as usize - 1)
                     .await?;
+                comments.push(comment);
             } else {
                 let comment = ogg_reader.get_bytes(comment_len as usize).await?;
                 if let Some(picture_check) = comment.get(0..VORBIS_PICTURE_MARKER.len()) {
@@ -123,6 +127,7 @@ async fn parse_opus_vorbis<'a>(
                         file_ptr: comment_ptr as i64,
                         last_ogg_header_ptr: Some(ogg_reader.last_header_ptr as i64),
                         value: Some(val),
+                        blob_hash: None,
                     });
                 } else {
                     println!("corrupted comment {:?}", String::from_utf8_lossy(&comment));

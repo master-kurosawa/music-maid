@@ -1,4 +1,5 @@
 use sqlx::{prelude::FromRow, Executor, Sqlite};
+use tokio_uring::fs::OpenOptions;
 
 use crate::io::{ogg::OggPageReader, reader::Corruption};
 
@@ -23,6 +24,56 @@ pub struct VorbisComment {
     pub last_ogg_header_ptr: Option<i64>,
     pub size: i64,
     pub value: Option<String>,
+    pub blob_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct VorbisBlob {
+    pub hash: String,
+    pub value: Option<Vec<u8>>,
+    pub file_path: Option<String>,
+}
+
+impl VorbisBlob {
+    pub fn new(data: Vec<u8>) -> Self {
+        let hash = blake3::hash(&data).to_string();
+        VorbisBlob {
+            value: Some(data),
+            file_path: None,
+            hash,
+        }
+    }
+    pub async fn with_path(data: Vec<u8>, ext: Option<String>) -> Result<Self, std::io::Error> {
+        let hash = blake3::hash(&data).to_string();
+        let file_path = format!("comments/{hash}.{}", ext.unwrap_or("".to_owned()));
+        let file = OpenOptions::new().write(true).open(&file_path).await?;
+        let (res, _buf) = file.write_all_at(data, 0).await;
+        res?;
+        Ok(VorbisBlob {
+            file_path: Some(file_path),
+            hash,
+            value: None,
+        })
+    }
+    pub async fn insert<'a, E>(&self, pool: E) -> Result<i64, sqlx::Error>
+    where
+        E: Executor<'a, Database = Sqlite>,
+    {
+        Ok(sqlx::query!(
+            "INSERT INTO vorbis_blobs(
+                hash,
+                value,
+                file_path
+            )
+            VALUES(?, ?, ?);",
+            self.hash,
+            self.value,
+            self.file_path
+        )
+        .execute(pool)
+        .await?
+        .last_insert_rowid())
+    }
 }
 
 impl VorbisComment {
@@ -182,6 +233,7 @@ impl VorbisComment {
                     last_ogg_header_ptr: None,
                     key,
                     file_ptr: block_ptr + comment_cursor as i64 - 4,
+                    blob_hash: None,
                 })
             } else {
                 println!(

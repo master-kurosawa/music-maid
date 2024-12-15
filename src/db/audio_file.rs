@@ -3,7 +3,7 @@ use sqlx::{prelude::FromRow, Executor, Sqlite};
 use super::{
     padding::Padding,
     picture::Picture,
-    vorbis::{VorbisComment, VorbisMeta},
+    vorbis::{VorbisBlob, VorbisComment, VorbisMeta},
 };
 
 #[derive(Debug, Clone)]
@@ -12,6 +12,7 @@ pub struct AudioFileMeta {
     pub comments: Vec<(VorbisMeta, Vec<VorbisComment>)>,
     pub pictures: Vec<Picture>,
     pub paddings: Vec<Padding>,
+    pub blobs: Vec<VorbisBlob>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -52,6 +53,7 @@ impl AudioFile {
             pictures,
             paddings,
             comments,
+            blobs: Vec::new(), // TEMP TODO
         })
     }
 
