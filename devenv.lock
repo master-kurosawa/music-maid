@@ -96,14 +96,14 @@
         ]
       },
       "locked": {
-        "lastModified": 1729533409,
-        "owner": "master-kurosawa",
+        "lastModified": 1733460612,
+        "owner": "acoustid",
         "repo": "mbslave",
-        "rev": "5cfaa8f3adc07173b6880ded632065897835ee89",
+        "rev": "a6d16861b667e8962dee437c60f2ad0a202e525b",
         "type": "github"
       },
       "original": {
-        "owner": "master-kurosawa",
+        "owner": "acoustid",
         "repo": "mbslave",
         "type": "github"
       }
